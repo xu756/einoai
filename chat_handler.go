@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"time"
 
-	"github.com/cloudwego/eino/adk"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 )
@@ -23,63 +25,135 @@ func NewHandler(ctx context.Context, rdb *redis.Client) *Handler {
 	}
 }
 
-type ChatRequest struct {
-	Message string `json:"message" binding:"required"`
+type CreateRunRequest struct {
+	Message string    `json:"message" binding:"required"`
+	Agent   AgentKind `json:"agent,omitempty"` // "chat" or "deep"
 }
 
 func (h *Handler) ChatRouter(r *gin.RouterGroup) {
 	chatGroup := r.Group("/chat")
-	chatGroup.POST("/stream", h.ChatStream)
-	chatGroup.POST("/deep/stream", h.DeepChatStream)
-	// AI SDK useChat / DefaultChatTransport 专用
-	chatGroup.POST("/usechat", h.ChatUseChatStream)
-	chatGroup.POST("/deep/usechat", h.DeepChatUseChatStream)
+	// 新协议
+	chatGroup.POST("/sessions/:sessionId/messages", h.CreateRun)
+	chatGroup.GET("/sessions/:sessionId/runs/:runId/events", h.RunEvents)
+
 }
 
-func (h *Handler) ChatStream(c *gin.Context) {
+func (h *Handler) CreateRun(c *gin.Context) {
 	if h.AgentManager == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "agent manager is not initialized"})
 		return
 	}
 
-	// var req ChatRequest
-	// if err := c.ShouldBindJSON(&req); err != nil {
-	// 	c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-	// 	return
-	// }
+	sessionID := c.Param("sessionId")
 
-	ctx := c.Request.Context()
-	ag, err := h.AgentManager.NewChatModelAgent(ctx)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	runner := h.AgentManager.NewRunner(ctx, ag)
-	iter := runner.Query(ctx, "这个是开发agent测试消息 你可以做什么 有那些功能 有那些智能体 工具 智能体里面有那些工具 帮我调用测试一下", adk.AgentRunOption{})
-	streamOpenAICompatible(c, iter, "GPT-4")
-}
-
-func (h *Handler) DeepChatStream(c *gin.Context) {
-	if h.AgentManager == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "agent manager is not initialized"})
-		return
-	}
-
-	var req ChatRequest
+	var req CreateRunRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	ctx := c.Request.Context()
-	ag, err := h.AgentManager.NewDeepAgent(ctx)
+	if req.Agent == "" {
+		req.Agent = AgentKindChat
+	}
+
+	runID, err := h.AgentManager.StartRun(c.Request.Context(), sessionID, req.Message, req.Agent)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	runner := h.AgentManager.NewRunner(ctx, ag)
-	iter := runner.Query(ctx, req.Message)
-	streamOpenAICompatible(c, iter, "GPT-4")
+	c.JSON(http.StatusAccepted, gin.H{
+		"sessionId": sessionID,
+		"runId":     runID,
+		"status":    "running",
+		"eventsUrl": "/api/chat/sessions/" + sessionID + "/runs/" + runID + "/events",
+	})
+}
+
+func (h *Handler) RunEvents(c *gin.Context) {
+	if h.AgentManager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "agent manager is not initialized"})
+		return
+	}
+
+	sessionID := c.Param("sessionId")
+	runID := c.Param("runId")
+
+	exists, err := h.AgentManager.runStore.RunExists(c.Request.Context(), sessionID, runID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if !exists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "run not found or expired"})
+		return
+	}
+
+	c.Writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	c.Writer.Header().Set("Cache-Control", "no-cache, no-transform")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+
+	lastID := c.Query("lastEventId")
+	if lastID == "" {
+		lastID = c.GetHeader("Last-Event-ID")
+	}
+	if lastID == "" {
+		lastID = "0-0"
+	}
+
+	ctx := c.Request.Context()
+
+	for {
+		events, err := h.AgentManager.runStore.ReadAfter(
+			ctx,
+			sessionID,
+			runID,
+			lastID,
+			15*time.Second,
+			100,
+		)
+
+		if ctx.Err() != nil {
+			return
+		}
+
+		if err != nil {
+			errObj := map[string]any{
+				"error": map[string]any{
+					"message": err.Error(),
+					"type":    "sse_read_error",
+				},
+			}
+			b, _ := json.Marshal(errObj)
+			writeSSEDataWithID(c, "", string(b))
+			return
+		}
+
+		if len(events) == 0 {
+			// heartbeat，防止 nginx / browser 长时间无数据断开
+			_, _ = fmt.Fprint(c.Writer, ": ping\n\n")
+			c.Writer.Flush()
+			continue
+		}
+
+		for _, ev := range events {
+			writeSSEDataWithID(c, ev.ID, ev.Data)
+			lastID = ev.ID
+
+			if ev.Data == "[DONE]" {
+				return
+			}
+		}
+	}
+}
+
+func writeSSEDataWithID(c *gin.Context, id string, data string) {
+	if id != "" {
+		_, _ = fmt.Fprintf(c.Writer, "id: %s\n", id)
+	}
+
+	// 保持 OpenAI-compatible：核心仍然是 data: {...} / data: [DONE]
+	_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", data)
+	c.Writer.Flush()
 }

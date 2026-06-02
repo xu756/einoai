@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,7 +9,6 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
-	"github.com/gin-gonic/gin"
 )
 
 type OpenAIChatCompletionChunk struct {
@@ -75,20 +75,61 @@ type OpenAICompletionTokensDetails struct {
 	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 }
 
-func streamOpenAICompatible(c *gin.Context, iter *adk.AsyncIterator[*adk.AgentEvent], modelName string) {
-	c.Writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-	c.Writer.Header().Set("Cache-Control", "no-cache, no-transform")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("X-Accel-Buffering", "no")
+func convertEinoUsage(u *schema.TokenUsage) *OpenAICompletionUsage {
+	if u == nil {
+		return nil
+	}
 
+	return &OpenAICompletionUsage{
+		PromptTokens:     u.PromptTokens,
+		CompletionTokens: u.CompletionTokens,
+		TotalTokens:      u.TotalTokens,
+		PromptTokensDetails: OpenAIPromptTokensDetails{
+			CachedTokens: u.PromptTokenDetails.CachedTokens,
+		},
+		CompletionTokensDetails: OpenAICompletionTokensDetails{
+			ReasoningTokens: u.CompletionTokensDetails.ReasoningTokens,
+		},
+	}
+}
+
+type OpenAISink interface {
+	WriteJSON(ctx context.Context, v any) error
+	WriteData(ctx context.Context, data string) error
+}
+
+type RedisOpenAISink struct {
+	store     *RunStore
+	sessionID string
+	runID     string
+}
+
+func (s *RedisOpenAISink) WriteJSON(ctx context.Context, v any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return s.WriteData(ctx, string(b))
+}
+
+func (s *RedisOpenAISink) WriteData(ctx context.Context, data string) error {
+	_, err := s.store.Append(ctx, s.sessionID, s.runID, data)
+	return err
+}
+
+func streamOpenAICompatibleToSink(
+	ctx context.Context,
+	sink OpenAISink,
+	iter *adk.AsyncIterator[*adk.AgentEvent],
+	modelName string,
+) error {
 	id := "chatcmpl-" + fmt.Sprintf("%d", time.Now().UnixNano())
 	created := time.Now().Unix()
 
 	for {
 		event, ok := iter.Next()
 		if !ok {
-			writeOpenAISSEData(c, "[DONE]")
-			return
+			return sink.WriteData(ctx, "[DONE]")
 		}
 
 		if event == nil {
@@ -96,16 +137,15 @@ func streamOpenAICompatible(c *gin.Context, iter *adk.AsyncIterator[*adk.AgentEv
 		}
 
 		if event.Err != nil {
-			// OpenAI error object 风格
 			errObj := map[string]any{
 				"error": map[string]any{
 					"message": event.Err.Error(),
 					"type":    "server_error",
 				},
 			}
-			writeOpenAISSEJSON(c, errObj)
-			writeOpenAISSEData(c, "[DONE]")
-			return
+			_ = sink.WriteJSON(ctx, errObj)
+			_ = sink.WriteData(ctx, "[DONE]")
+			return event.Err
 		}
 
 		if event.Output == nil || event.Output.MessageOutput == nil {
@@ -128,34 +168,39 @@ func streamOpenAICompatible(c *gin.Context, iter *adk.AsyncIterator[*adk.AgentEv
 							"type":    "stream_error",
 						},
 					}
-					writeOpenAISSEJSON(c, errObj)
-					writeOpenAISSEData(c, "[DONE]")
-					return
+					_ = sink.WriteJSON(ctx, errObj)
+					_ = sink.WriteData(ctx, "[DONE]")
+					return err
 				}
 
 				if msg == nil {
 					continue
 				}
 
-				writeEinoMessageAsOpenAIChunk(c, id, created, modelName, msg)
+				if err := writeEinoMessageAsOpenAIChunkToSink(ctx, sink, id, created, modelName, msg); err != nil {
+					return err
+				}
 			}
 
 			continue
 		}
 
 		if mv.Message != nil {
-			writeEinoMessageAsOpenAIChunk(c, id, created, modelName, mv.Message)
+			if err := writeEinoMessageAsOpenAIChunkToSink(ctx, sink, id, created, modelName, mv.Message); err != nil {
+				return err
+			}
 		}
 	}
 }
 
-func writeEinoMessageAsOpenAIChunk(
-	c *gin.Context,
+func writeEinoMessageAsOpenAIChunkToSink(
+	ctx context.Context,
+	sink OpenAISink,
 	id string,
 	created int64,
 	modelName string,
 	msg *schema.Message,
-) {
+) error {
 	delta := OpenAIDelta{}
 
 	if msg.Role != "" {
@@ -166,12 +211,10 @@ func writeEinoMessageAsOpenAIChunk(
 		delta.Content = msg.Content
 	}
 
-	// 关键：保留 reasoning_content
 	if msg.ReasoningContent != "" {
 		delta.ReasoningContent = msg.ReasoningContent
 	}
 
-	// 关键：保留 OpenAI 标准 tool_calls 数组
 	if len(msg.ToolCalls) > 0 {
 		delta.ToolCalls = make([]OpenAIToolCallDelta, 0, len(msg.ToolCalls))
 
@@ -193,17 +236,12 @@ func writeEinoMessageAsOpenAIChunk(
 		}
 	}
 
-	// Eino tool message -> Agent UI 扩展字段
-	// OpenAI 官方协议里，tool result 通常是下一轮请求里的 role=tool message；
-	// 但如果你要让前端实时展示工具结果，可以保留成 tool_result。
 	if msg.Role == schema.Tool {
 		delta.ToolResult = &OpenAIToolResultDelta{
 			ToolCallID: msg.ToolCallID,
 			Name:       msg.ToolName,
 			Content:    msg.Content,
 		}
-
-		// 避免工具结果也被普通 content 渲染两次
 		delta.Content = ""
 	}
 
@@ -220,8 +258,6 @@ func writeEinoMessageAsOpenAIChunk(
 		}
 	}
 
-	// 空 delta 但带 finish_reason / usage 的 chunk 也必须发。
-	// 你的样例里 token 花费就是这种 chunk。
 	chunk := OpenAIChatCompletionChunk{
 		ID:      id,
 		Object:  "chat.completion.chunk",
@@ -237,89 +273,5 @@ func writeEinoMessageAsOpenAIChunk(
 		Usage: usage,
 	}
 
-	writeOpenAISSEJSON(c, chunk)
-}
-
-func convertEinoUsage(u *schema.TokenUsage) *OpenAICompletionUsage {
-	if u == nil {
-		return nil
-	}
-
-	return &OpenAICompletionUsage{
-		PromptTokens:     u.PromptTokens,
-		CompletionTokens: u.CompletionTokens,
-		TotalTokens:      u.TotalTokens,
-		PromptTokensDetails: OpenAIPromptTokensDetails{
-			CachedTokens: u.PromptTokenDetails.CachedTokens,
-		},
-		CompletionTokensDetails: OpenAICompletionTokensDetails{
-			ReasoningTokens: u.CompletionTokensDetails.ReasoningTokens,
-		},
-	}
-}
-
-func writeOpenAISSEJSON(c *gin.Context, v any) {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return
-	}
-
-	writeOpenAISSEData(c, string(b))
-}
-
-func writeOpenAISSEData(c *gin.Context, data string) {
-	_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", data)
-	c.Writer.Flush()
-}
-
-// streamAgentEvents 将 eino AgentEvent 原样以 SSE 流式推送给前端。
-// 流式消息会逐 chunk 从 MessageStream 读取，每个 chunk（*schema.Message）直接 JSON 序列化发送，不做任何字段裁剪。
-func streamAgentEvents(c *gin.Context, iter *adk.AsyncIterator[*adk.AgentEvent]) {
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("X-Accel-Buffering", "no")
-
-	for {
-		event, ok := iter.Next()
-		if !ok {
-			c.SSEvent("done", "[DONE]")
-			c.Writer.Flush()
-			return
-		}
-
-		if event.Err != nil {
-			errData, _ := json.Marshal(map[string]string{"error": event.Err.Error()})
-			c.SSEvent("error", string(errData))
-			c.Writer.Flush()
-			return
-		}
-
-		if event.Output == nil || event.Output.MessageOutput == nil {
-			continue
-		}
-
-		mv := event.Output.MessageOutput
-
-		// 流式：逐 chunk 读 MessageStream，每个 chunk 就是一个 *schema.Message，原样发送
-		if mv.IsStreaming && mv.MessageStream != nil {
-			for {
-				msg, err := mv.MessageStream.Recv()
-				if err != nil {
-					break // io.EOF = 流结束
-				}
-				data, _ := json.Marshal(msg)
-				c.SSEvent("message", string(data))
-				c.Writer.Flush()
-			}
-			continue
-		}
-
-		// 非流式：完整 *schema.Message，原样发送
-		if mv.Message != nil {
-			data, _ := json.Marshal(mv.Message)
-			c.SSEvent("message", string(data))
-			c.Writer.Flush()
-		}
-	}
+	return sink.WriteJSON(ctx, chunk)
 }

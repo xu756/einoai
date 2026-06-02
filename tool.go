@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
@@ -21,6 +22,7 @@ func NewWeatherTool(ctx context.Context) (tool.BaseTool, error) {
 	return utils.InferTool("get_weather", "Get the current weather in a given location",
 		func(ctx context.Context, input *WeatherInput) (*WeatherOutput, error) {
 			log.Printf("Getting weather for %s", input.Location)
+			time.Sleep(3 * time.Second)
 			return &WeatherOutput{
 				Weather: fmt.Sprintf("The weather in %s is sunny, 25°C", input.Location),
 			}, nil
@@ -40,6 +42,7 @@ func NewCalculatorTool(ctx context.Context) (tool.BaseTool, error) {
 		func(ctx context.Context, input *CalculatorInput) (*CalculatorOutput, error) {
 			log.Printf("Evaluating expression: %s", input.Expression)
 			// This is a dummy implementation
+
 			return &CalculatorOutput{
 				Result: "42", // The answer to everything
 			}, nil
