@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/cloudwego/eino-ext/components/model/openai"
@@ -18,9 +20,10 @@ import (
 )
 
 type AgentManager struct {
-	rdb      *redis.Client
-	runStore *RunStore
-	model    model.ToolCallingChatModel
+	runStore   *RunStore
+	model      model.ToolCallingChatModel
+	runMu      sync.Mutex
+	runCancels map[string]context.CancelFunc
 }
 
 func NewAgentManager(ctx context.Context, rdb *redis.Client) (*AgentManager, error) {
@@ -34,9 +37,9 @@ func NewAgentManager(ctx context.Context, rdb *redis.Client) (*AgentManager, err
 	}
 
 	return &AgentManager{
-		model:    cm,
-		rdb:      rdb,
-		runStore: NewRunStore(rdb),
+		model:      cm,
+		runStore:   NewRunStore(rdb),
+		runCancels: make(map[string]context.CancelFunc),
 	}, nil
 }
 
@@ -128,23 +131,92 @@ func (m *AgentManager) StartRun(
 		return "", err
 	}
 
-	go m.executeRun(sessionID, runID, message, kind)
+	runCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	m.registerRunCancel(runID, cancel)
+
+	go m.executeRun(runCtx, cancel, sessionID, runID, message, kind)
 
 	return runID, nil
 }
 
+func (m *AgentManager) CancelSessionRun(ctx context.Context, sessionID string, runID string) (*RunMeta, bool, error) {
+	run, err := m.runStore.GetCurrentRun(ctx, sessionID)
+	if err != nil {
+		return nil, false, err
+	}
+	if run == nil {
+		return nil, false, nil
+	}
+	if run.RunID != runID {
+		return nil, false, nil
+	}
+	if isTerminalRunStatus(run.Status) {
+		return nil, false, nil
+	}
+
+	if err := m.runStore.SetRunStatus(ctx, run.SessionID, run.RunID, RunStatusCanceling); err != nil {
+		return nil, false, err
+	}
+
+	if m.cancelActiveRun(run.RunID) {
+		run.Status = RunStatusCanceling
+		return run, true, nil
+	}
+
+	_, _ = m.runStore.Append(ctx, run.SessionID, run.RunID, "[DONE]")
+	if err := m.runStore.SetRunStatus(ctx, run.SessionID, run.RunID, RunStatusCanceled); err != nil {
+		return nil, false, err
+	}
+	run.Status = RunStatusCanceled
+	return run, true, nil
+}
+
+func (m *AgentManager) registerRunCancel(runID string, cancel context.CancelFunc) {
+	m.runMu.Lock()
+	defer m.runMu.Unlock()
+
+	if m.runCancels == nil {
+		m.runCancels = make(map[string]context.CancelFunc)
+	}
+	m.runCancels[runID] = cancel
+}
+
+func (m *AgentManager) unregisterRunCancel(runID string) {
+	m.runMu.Lock()
+	defer m.runMu.Unlock()
+
+	delete(m.runCancels, runID)
+}
+
+func (m *AgentManager) cancelActiveRun(runID string) bool {
+	m.runMu.Lock()
+	cancel := m.runCancels[runID]
+	m.runMu.Unlock()
+
+	if cancel == nil {
+		return false
+	}
+
+	cancel()
+	return true
+}
+
+func isTerminalRunStatus(status RunStatus) bool {
+	return status == RunStatusDone || status == RunStatusError || status == RunStatusCanceled
+}
+
 func (m *AgentManager) executeRun(
+	ctx context.Context,
+	cancel context.CancelFunc,
 	sessionID string,
 	runID string,
 	message string,
 	kind AgentKind,
 ) {
-	// 重点：这里不能用 HTTP request context。
-	// 这个 ctx 只代表后台 run 自己的生命周期。
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+	defer m.unregisterRunCancel(runID)
 
-	_ = m.runStore.SetRunStatus(ctx, sessionID, runID, "running")
+	_ = m.runStore.SetRunStatus(ctx, sessionID, runID, RunStatusRunning)
 
 	var (
 		ag  adk.Agent
@@ -159,7 +231,12 @@ func (m *AgentManager) executeRun(
 	}
 
 	if err != nil {
-		m.writeRunError(ctx, sessionID, runID, err)
+		if errors.Is(ctx.Err(), context.Canceled) {
+			m.finishRunCanceled(sessionID, runID)
+			return
+		}
+
+		m.writeRunError(context.Background(), sessionID, runID, err)
 		return
 	}
 
@@ -178,11 +255,20 @@ func (m *AgentManager) executeRun(
 	}
 
 	if err := streamOpenAICompatibleToSink(ctx, sink, iter, modelName); err != nil {
-		_ = m.runStore.SetRunStatus(context.Background(), sessionID, runID, "error")
+		if errors.Is(err, context.Canceled) {
+			m.finishRunCanceled(sessionID, runID)
+			return
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			m.writeRunError(context.Background(), sessionID, runID, err)
+			return
+		}
+
+		_ = m.runStore.SetRunStatus(context.Background(), sessionID, runID, RunStatusError)
 		return
 	}
 
-	_ = m.runStore.SetRunStatus(context.Background(), sessionID, runID, "done")
+	_ = m.runStore.SetRunStatus(context.Background(), sessionID, runID, RunStatusDone)
 }
 
 func (m *AgentManager) writeRunError(ctx context.Context, sessionID, runID string, err error) {
@@ -196,5 +282,11 @@ func (m *AgentManager) writeRunError(ctx context.Context, sessionID, runID strin
 	b, _ := json.Marshal(errObj)
 	_, _ = m.runStore.Append(ctx, sessionID, runID, string(b))
 	_, _ = m.runStore.Append(ctx, sessionID, runID, "[DONE]")
-	_ = m.runStore.SetRunStatus(ctx, sessionID, runID, "error")
+	_ = m.runStore.SetRunStatus(ctx, sessionID, runID, RunStatusError)
+}
+
+func (m *AgentManager) finishRunCanceled(sessionID, runID string) {
+	ctx := context.Background()
+	_, _ = m.runStore.Append(ctx, sessionID, runID, "[DONE]")
+	_ = m.runStore.SetRunStatus(ctx, sessionID, runID, RunStatusCanceled)
 }

@@ -127,6 +127,10 @@ func streamOpenAICompatibleToSink(
 	created := time.Now().Unix()
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		event, ok := iter.Next()
 		if !ok {
 			return sink.WriteData(ctx, "[DONE]")
@@ -134,6 +138,10 @@ func streamOpenAICompatibleToSink(
 
 		if event == nil {
 			continue
+		}
+
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 
 		if event.Err != nil {
@@ -156,10 +164,17 @@ func streamOpenAICompatibleToSink(
 
 		if mv.IsStreaming && mv.MessageStream != nil {
 			for {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+
 				msg, err := mv.MessageStream.Recv()
 				if err != nil {
 					if err == io.EOF {
 						break
+					}
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						return ctxErr
 					}
 
 					errObj := map[string]any{

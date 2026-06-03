@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -10,9 +11,28 @@ import (
 
 const runTTL = 2 * time.Hour
 
+type RunStatus string
+
+const (
+	RunStatusRunning   RunStatus = "running"
+	RunStatusDone      RunStatus = "done"
+	RunStatusError     RunStatus = "error"
+	RunStatusCanceling RunStatus = "canceling"
+	RunStatusCanceled  RunStatus = "canceled"
+)
+
 type RunEvent struct {
 	ID   string
 	Data string
+}
+
+type RunMeta struct {
+	SessionID string    `json:"sessionId"`
+	RunID     string    `json:"runId"`
+	Message   string    `json:"message"`
+	Status    RunStatus `json:"status"`
+	CreatedAt int64     `json:"createdAt"`
+	UpdatedAt int64     `json:"updatedAt,omitempty"`
 }
 
 type RunStore struct {
@@ -31,16 +51,24 @@ func runMetaKey(sessionID, runID string) string {
 	return fmt.Sprintf("chat:sessions:%s:runs:%s:meta", sessionID, runID)
 }
 
+func currentRunKey(sessionID string) string {
+	return fmt.Sprintf("chat:sessions:%s:current_run", sessionID)
+}
+
 func (s *RunStore) InitRun(ctx context.Context, sessionID, runID, message string) error {
 	metaKey := runMetaKey(sessionID, runID)
+	now := time.Now().UnixMilli()
 
 	if err := s.rdb.HSet(ctx, metaKey, map[string]any{
 		"session_id": sessionID,
 		"run_id":     runID,
 		"message":    message,
-		"status":     "running",
-		"created_at": time.Now().Unix(),
+		"status":     string(RunStatusRunning),
+		"created_at": now,
 	}).Err(); err != nil {
+		return err
+	}
+	if err := s.rdb.Set(ctx, currentRunKey(sessionID), runID, runTTL).Err(); err != nil {
 		return err
 	}
 
@@ -49,14 +77,73 @@ func (s *RunStore) InitRun(ctx context.Context, sessionID, runID, message string
 	return nil
 }
 
-func (s *RunStore) SetRunStatus(ctx context.Context, sessionID, runID, status string) error {
+func (s *RunStore) SetRunStatus(ctx context.Context, sessionID, runID string, status RunStatus) error {
 	metaKey := runMetaKey(sessionID, runID)
-	return s.rdb.HSet(ctx, metaKey, "status", status, "updated_at", time.Now().Unix()).Err()
+	if err := s.rdb.HSet(ctx, metaKey, "status", string(status), "updated_at", time.Now().UnixMilli()).Err(); err != nil {
+		return err
+	}
+	if isTerminalRunStatus(status) {
+		return s.clearCurrentRunIfMatches(ctx, sessionID, runID)
+	}
+	_ = s.rdb.Expire(ctx, currentRunKey(sessionID), runTTL).Err()
+	_ = s.rdb.Expire(ctx, metaKey, runTTL).Err()
+	return nil
 }
 
-func (s *RunStore) RunExists(ctx context.Context, sessionID, runID string) (bool, error) {
-	n, err := s.rdb.Exists(ctx, runMetaKey(sessionID, runID)).Result()
-	return n > 0, err
+func (s *RunStore) clearCurrentRunIfMatches(ctx context.Context, sessionID, runID string) error {
+	const script = `
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+	return redis.call("DEL", KEYS[1])
+end
+return 0
+`
+	return s.rdb.Eval(ctx, script, []string{currentRunKey(sessionID)}, runID).Err()
+}
+
+func (s *RunStore) GetRun(ctx context.Context, sessionID, runID string) (*RunMeta, error) {
+	values, err := s.rdb.HGetAll(ctx, runMetaKey(sessionID, runID)).Result()
+	if err != nil {
+		return nil, err
+	}
+	if len(values) == 0 {
+		return nil, nil
+	}
+
+	return runMetaFromHash(values), nil
+}
+
+func (s *RunStore) GetCurrentRun(ctx context.Context, sessionID string) (*RunMeta, error) {
+	runID, err := s.rdb.Get(ctx, currentRunKey(sessionID)).Result()
+	if err == redis.Nil {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	run, err := s.GetRun(ctx, sessionID, runID)
+	if err != nil {
+		return nil, err
+	}
+	if run == nil {
+		_ = s.rdb.Del(ctx, currentRunKey(sessionID)).Err()
+	}
+
+	return run, nil
+}
+
+func runMetaFromHash(values map[string]string) *RunMeta {
+	createdAt, _ := strconv.ParseInt(values["created_at"], 10, 64)
+	updatedAt, _ := strconv.ParseInt(values["updated_at"], 10, 64)
+
+	return &RunMeta{
+		SessionID: values["session_id"],
+		RunID:     values["run_id"],
+		Message:   values["message"],
+		Status:    RunStatus(values["status"]),
+		CreatedAt: createdAt,
+		UpdatedAt: updatedAt,
+	}
 }
 
 func (s *RunStore) Append(ctx context.Context, sessionID, runID, data string) (string, error) {
@@ -76,6 +163,7 @@ func (s *RunStore) Append(ctx context.Context, sessionID, runID, data string) (s
 
 	_ = s.rdb.Expire(ctx, key, runTTL).Err()
 	_ = s.rdb.Expire(ctx, runMetaKey(sessionID, runID), runTTL).Err()
+	_ = s.rdb.Expire(ctx, currentRunKey(sessionID), runTTL).Err()
 
 	return id, nil
 }

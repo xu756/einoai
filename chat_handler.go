@@ -32,10 +32,10 @@ type CreateRunRequest struct {
 
 func (h *Handler) ChatRouter(r *gin.RouterGroup) {
 	chatGroup := r.Group("/chat")
-	// 新协议
-	chatGroup.POST("/sessions/:sessionId/messages", h.CreateRun)
-	chatGroup.GET("/sessions/:sessionId/runs/:runId/events", h.RunEvents)
-
+	chatGroup.POST("/sessions/:sessionId", h.CreateRun)
+	chatGroup.GET("/sessions/:sessionId", h.GetSessionRun)
+	chatGroup.POST("/sessions/:sessionId/runs/:runId", h.RunEvents)
+	chatGroup.POST("/sessions/:sessionId/cancel/:runId", h.CancelSessionRun)
 }
 
 func (h *Handler) CreateRun(c *gin.Context) {
@@ -65,8 +65,55 @@ func (h *Handler) CreateRun(c *gin.Context) {
 	c.JSON(http.StatusAccepted, gin.H{
 		"sessionId": sessionID,
 		"runId":     runID,
-		"status":    "running",
-		"eventsUrl": "/api/chat/sessions/" + sessionID + "/runs/" + runID + "/events",
+		"status":    RunStatusRunning,
+	})
+}
+
+func (h *Handler) GetSessionRun(c *gin.Context) {
+	if h.AgentManager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "agent manager is not initialized"})
+		return
+	}
+
+	sessionID := c.Param("sessionId")
+
+	run, err := h.AgentManager.runStore.GetCurrentRun(c.Request.Context(), sessionID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"sessionId": sessionID,
+		"run":       run,
+	})
+}
+
+func (h *Handler) CancelSessionRun(c *gin.Context) {
+	if h.AgentManager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "agent manager is not initialized"})
+		return
+	}
+
+	sessionID := c.Param("sessionId")
+	runID := c.Param("runId")
+
+	run, ok, err := h.AgentManager.CancelSessionRun(c.Request.Context(), sessionID, runID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if !ok {
+		c.JSON(http.StatusOK, gin.H{
+			"sessionId": sessionID,
+			"run":       nil,
+		})
+		return
+	}
+
+	c.JSON(http.StatusAccepted, gin.H{
+		"sessionId": sessionID,
+		"run":       run,
 	})
 }
 
@@ -79,22 +126,15 @@ func (h *Handler) RunEvents(c *gin.Context) {
 	sessionID := c.Param("sessionId")
 	runID := c.Param("runId")
 
-	exists, err := h.AgentManager.runStore.RunExists(c.Request.Context(), sessionID, runID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "run not found or expired"})
-		return
-	}
-
 	c.Writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	c.Writer.Header().Set("Cache-Control", "no-cache, no-transform")
 	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 
-	lastID := c.Query("lastEventId")
+	lastID := c.Query("after")
+	if lastID == "" {
+		lastID = c.Query("lastEventId")
+	}
 	if lastID == "" {
 		lastID = c.GetHeader("Last-Event-ID")
 	}
@@ -104,11 +144,33 @@ func (h *Handler) RunEvents(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
+	run, err := h.AgentManager.runStore.GetCurrentRun(ctx, sessionID)
+	if err != nil {
+		errObj := map[string]any{
+			"error": map[string]any{
+				"message": err.Error(),
+				"type":    "sse_read_error",
+			},
+		}
+		b, _ := json.Marshal(errObj)
+		writeSSEDataWithID(c, "", string(b))
+		writeSSEDataWithID(c, "", "[DONE]")
+		return
+	}
+	if run == nil {
+		writeSSEDataWithID(c, "", "[DONE]")
+		return
+	}
+	if run.RunID != runID || isTerminalRunStatus(run.Status) {
+		writeSSEDataWithID(c, "", "[DONE]")
+		return
+	}
+
 	for {
 		events, err := h.AgentManager.runStore.ReadAfter(
 			ctx,
 			sessionID,
-			runID,
+			run.RunID,
 			lastID,
 			15*time.Second,
 			100,

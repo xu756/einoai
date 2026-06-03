@@ -21,8 +21,20 @@ type WeatherOutput struct {
 func NewWeatherTool(ctx context.Context) (tool.BaseTool, error) {
 	return utils.InferTool("get_weather", "Get the current weather in a given location",
 		func(ctx context.Context, input *WeatherInput) (*WeatherOutput, error) {
-			log.Printf("Getting weather for %s", input.Location)
-			time.Sleep(3 * time.Second)
+			// 1. 打印开始时间，确认工具真的被触发了
+			log.Printf("[工具触发] 开始获取 %s 的天气, 当前时间: %s", input.Location, time.Now().Format("15:04:05"))
+
+			// 2. 检查进来的 Context 是不是本来就已经过期了
+			if err := ctx.Err(); err != nil {
+				log.Printf("[警告] 刚进入工具时 Context 就已经失效了: %v", err)
+			}
+
+			// 3. 执行睡眠
+			time.Sleep(10 * time.Second)
+
+			// 4. 打印结束时间
+			log.Printf("[工具结束] 睡眠完成, 当前时间: %s", time.Now().Format("15:04:05"))
+
 			return &WeatherOutput{
 				Weather: fmt.Sprintf("The weather in %s is sunny, 25°C", input.Location),
 			}, nil
