@@ -30,7 +30,7 @@ func NewWeatherTool(ctx context.Context) (tool.BaseTool, error) {
 			}
 
 			// 3. 执行睡眠
-			time.Sleep(10 * time.Second)
+			// time.Sleep(10 * time.Second)
 
 			// 4. 打印结束时间
 			log.Printf("[工具结束] 睡眠完成, 当前时间: %s", time.Now().Format("15:04:05"))
