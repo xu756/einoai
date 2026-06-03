@@ -218,7 +218,7 @@ func (m *AgentManager) StartAIRun(ctx context.Context, sessionID string, message
 	return runID, nil
 }
 
-// executeRun runs the agent for OpenAI API protocol (writes OpenAI SSE to Redis).
+// executeRun runs the agent for OpenAI API protocol (writes schema.Message to Redis).
 func (m *AgentManager) executeRun(
 	ctx context.Context,
 	cancel context.CancelFunc,
@@ -256,18 +256,7 @@ func (m *AgentManager) executeRun(
 	runner := m.NewRunner(ctx, ag)
 	iter := runner.Query(ctx, message)
 
-	sink := &RedisOpenAISink{
-		store:     m.runStore,
-		sessionID: sessionID,
-		runID:     runID,
-	}
-
-	modelName := os.Getenv("MODEL_NAME")
-	if modelName == "" {
-		modelName = "GPT-4"
-	}
-
-	if err := streamOpenAICompatibleToSink(ctx, sink, iter, modelName); err != nil {
+	if err := m.streamToRedis(ctx, iter, sessionID, runID); err != nil {
 		if errors.Is(err, context.Canceled) {
 			m.finishRunCanceled(sessionID, runID)
 			return
@@ -283,7 +272,7 @@ func (m *AgentManager) executeRun(
 	_ = m.runStore.SetRunStatus(context.Background(), sessionID, runID, RunStatusDone)
 }
 
-// executeAIRun runs the agent for AI SDK protocol (writes AISDK SSE to Redis).
+// executeAIRun runs the agent for AI SDK protocol (writes schema.Message to Redis).
 func (m *AgentManager) executeAIRun(
 	ctx context.Context,
 	cancel context.CancelFunc,
@@ -292,55 +281,61 @@ func (m *AgentManager) executeAIRun(
 	message string,
 	kind AgentKind,
 ) {
-	defer cancel()
-	defer m.unregisterRunCancel(runID)
+	// Re-uses the exact same logic as executeRun because both now just stream raw schema.Message to Redis
+	m.executeRun(ctx, cancel, sessionID, runID, message, kind)
+}
 
-	_ = m.runStore.SetRunStatus(ctx, sessionID, runID, RunStatusRunning)
-
-	var (
-		ag  adk.Agent
-		err error
-	)
-
-	switch kind {
-	case AgentKindDeep:
-		ag, err = m.NewDeepAgent(ctx)
-	default:
-		ag, err = m.NewChatModelAgent(ctx)
-	}
-
-	if err != nil {
-		if errors.Is(ctx.Err(), context.Canceled) {
-			m.finishRunCanceled(sessionID, runID)
-			return
+func (m *AgentManager) streamToRedis(ctx context.Context, iter *adk.AsyncIterator[*adk.AgentEvent], sessionID, runID string) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		m.writeRunError(context.Background(), sessionID, runID, err)
-		return
-	}
 
-	runner := m.NewRunner(ctx, ag)
-	iter := runner.Query(ctx, message)
-
-	aisdkSink := &RedisAISDKSink{
-		store:     m.runStore,
-		sessionID: sessionID,
-		runID:     runID,
-	}
-
-	if err := m.streamAISDKToSink(ctx, iter, aisdkSink); err != nil {
-		if errors.Is(err, context.Canceled) {
-			m.finishRunCanceled(sessionID, runID)
-			return
+		event, ok := iter.Next()
+		if !ok {
+			b, _ := json.Marshal(StreamEvent{Type: StreamEventDone})
+			_, _ = m.runStore.Append(context.Background(), sessionID, runID, string(b))
+			return nil
 		}
-		if errors.Is(err, context.DeadlineExceeded) {
-			m.writeRunError(context.Background(), sessionID, runID, err)
-			return
+		if event == nil {
+			continue
 		}
-		_ = m.runStore.SetRunStatus(context.Background(), sessionID, runID, RunStatusError)
-		return
-	}
+		if event.Err != nil {
+			b, _ := json.Marshal(StreamEvent{Type: StreamEventError, Error: event.Err.Error()})
+			_, _ = m.runStore.Append(context.Background(), sessionID, runID, string(b))
+			return event.Err
+		}
+		if event.Output == nil || event.Output.MessageOutput == nil {
+			continue
+		}
 
-	_ = m.runStore.SetRunStatus(context.Background(), sessionID, runID, RunStatusDone)
+		mv := event.Output.MessageOutput
+		if mv.IsStreaming && mv.MessageStream != nil {
+			for {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				msg, err := mv.MessageStream.Recv()
+				if err != nil {
+					if err == io.EOF {
+						break
+					}
+					b, _ := json.Marshal(StreamEvent{Type: StreamEventError, Error: err.Error()})
+					_, _ = m.runStore.Append(context.Background(), sessionID, runID, string(b))
+					return err
+				}
+				if msg != nil {
+					b, _ := json.Marshal(StreamEvent{Type: StreamEventMessage, Message: msg})
+					_, _ = m.runStore.Append(context.Background(), sessionID, runID, string(b))
+				}
+			}
+			continue
+		}
+		if mv.Message != nil {
+			b, _ := json.Marshal(StreamEvent{Type: StreamEventMessage, Message: mv.Message})
+			_, _ = m.runStore.Append(context.Background(), sessionID, runID, string(b))
+		}
+	}
 }
 
 // streamAISDKToSink writes AISDK format events from the iterator to the sink.

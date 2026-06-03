@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/schema"
 
 	"github.com/gin-gonic/gin"
 )
@@ -182,6 +183,19 @@ func (h *Handler) RunAIEvents(c *gin.Context) {
 }
 
 func (h *Handler) streamFromRedis(c *gin.Context, ctx context.Context, sessionID, runID, lastID string) {
+	state := &useChatStreamState{
+		messageID:         fmt.Sprintf("msg_%d", time.Now().UnixNano()),
+		textID:            fmt.Sprintf("text_%d", time.Now().UnixNano()),
+		reasoningID:       fmt.Sprintf("reasoning_%d", time.Now().UnixNano()),
+		toolCalls:         make(map[string]*toolCallState),
+		toolCallIndexToID: make(map[int]string),
+	}
+	if lastID == "0-0" || lastID == "" {
+		writePart(c, nil, map[string]any{"type": "start", "messageId": state.messageID})
+		writePart(c, nil, map[string]any{"type": "start-step"})
+		state.stepStarted = true
+	}
+
 	for {
 		events, err := h.AgentManager.runStore.ReadAIStream(ctx, sessionID, runID, lastID, 15*time.Second)
 		if ctx.Err() != nil {
@@ -196,18 +210,43 @@ func (h *Handler) streamFromRedis(c *gin.Context, ctx context.Context, sessionID
 			c.Writer.Flush()
 			continue
 		}
+
+		var msgs []*schema.Message
+		var lastEvID string
+		var done bool
+		var errText string
+
 		for _, ev := range events {
-			if ev.ID != "" {
-				_, _ = fmt.Fprintf(c.Writer, "id: %s\n", ev.ID)
+			var se StreamEvent
+			_ = json.Unmarshal([]byte(ev.Data), &se)
+			if se.Type == StreamEventMessage && se.Message != nil {
+				msgs = append(msgs, se.Message)
+			} else if se.Type == StreamEventError {
+				errText = se.Error
+				done = true
+			} else if se.Type == StreamEventDone {
+				done = true
 			}
-			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", ev.Data)
-			lastID = ev.ID
-			if ev.Data == "[DONE]" {
-				c.Writer.Flush()
-				return
-			}
+			lastEvID = ev.ID
 		}
-		c.Writer.Flush()
+
+		if len(msgs) > 0 {
+			mergedMsg, _ := schema.ConcatMessages(msgs)
+			writeEinoMsgAsAISDKParts(c, nil, state, mergedMsg)
+		}
+		if errText != "" {
+			writePart(c, nil, map[string]any{"type": "error", "errorText": errText})
+		}
+		if done {
+			finishOpenBlocks(c, nil, state)
+			writePart(c, nil, map[string]any{"type": "finish-step"})
+			writePart(c, nil, map[string]any{"type": "finish"})
+			h.writeAIDone(c)
+			return
+		}
+		if lastEvID != "" {
+			lastID = lastEvID
+		}
 	}
 }
 

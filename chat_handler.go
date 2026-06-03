@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
+	"github.com/cloudwego/eino/schema"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 )
@@ -167,6 +169,13 @@ func (h *Handler) RunEvents(c *gin.Context) {
 		return
 	}
 
+	id := "chatcmpl-" + runID
+	created := time.Now().Unix()
+	modelName := os.Getenv("MODEL_NAME")
+	if modelName == "" {
+		modelName = "GPT-4"
+	}
+
 	for {
 		events, err := h.AgentManager.runStore.ReadAfter(
 			ctx,
@@ -174,7 +183,7 @@ func (h *Handler) RunEvents(c *gin.Context) {
 			run.RunID,
 			lastID,
 			15*time.Second,
-			100,
+			2000,
 		)
 
 		if ctx.Err() != nil {
@@ -200,15 +209,67 @@ func (h *Handler) RunEvents(c *gin.Context) {
 			continue
 		}
 
-		for _, ev := range events {
-			writeSSEDataWithID(c, ev.ID, ev.Data)
-			lastID = ev.ID
+		var msgs []*schema.Message
+		var lastEvID string
+		var done bool
+		var errText string
 
-			if ev.Data == "[DONE]" {
-				return
+		for _, ev := range events {
+			var se StreamEvent
+			_ = json.Unmarshal([]byte(ev.Data), &se)
+			if se.Type == StreamEventMessage && se.Message != nil {
+				msgs = append(msgs, se.Message)
+			} else if se.Type == StreamEventError {
+				errText = se.Error
+				done = true
+			} else if se.Type == StreamEventDone {
+				done = true
 			}
+			lastEvID = ev.ID
+		}
+
+		if len(msgs) > 0 {
+			mergedMsg, _ := schema.ConcatMessages(msgs)
+			sink := &HTTPResponseWriterSink{c: c, lastEvID: lastEvID}
+			_ = writeEinoMessageAsOpenAIChunkToSink(ctx, sink, id, created, modelName, mergedMsg)
+		}
+		if errText != "" {
+			errObj := map[string]any{
+				"error": map[string]any{
+					"message": errText,
+					"type":    "server_error",
+				},
+			}
+			b, _ := json.Marshal(errObj)
+			writeSSEDataWithID(c, lastEvID, string(b))
+		}
+		if done {
+			writeSSEDataWithID(c, lastEvID, "[DONE]")
+			return
+		}
+		if lastEvID != "" {
+			lastID = lastEvID
 		}
 	}
+}
+
+// HTTPResponseWriterSink writes OpenAI JSON chunk to gin.Context.Writer as SSE.
+type HTTPResponseWriterSink struct {
+	c        *gin.Context
+	lastEvID string
+}
+
+func (s *HTTPResponseWriterSink) WriteJSON(ctx context.Context, v any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return s.WriteData(ctx, string(b))
+}
+
+func (s *HTTPResponseWriterSink) WriteData(ctx context.Context, data string) error {
+	writeSSEDataWithID(s.c, s.lastEvID, data)
+	return nil
 }
 
 func writeSSEDataWithID(c *gin.Context, id string, data string) {

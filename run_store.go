@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/cloudwego/eino/schema"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -33,6 +34,20 @@ type RunMeta struct {
 	Status    RunStatus `json:"status"`
 	CreatedAt int64     `json:"createdAt"`
 	UpdatedAt int64     `json:"updatedAt,omitempty"`
+}
+
+type StreamEventType string
+
+const (
+	StreamEventMessage StreamEventType = "message"
+	StreamEventError   StreamEventType = "error"
+	StreamEventDone    StreamEventType = "done"
+)
+
+type StreamEvent struct {
+	Type    StreamEventType `json:"type"`
+	Message *schema.Message `json:"message,omitempty"`
+	Error   string          `json:"error,omitempty"`
 }
 
 type RunStore struct {
@@ -226,7 +241,7 @@ func (s *RunStore) ReadAIStream(
 
 	streams, err := s.rdb.XRead(ctx, &redis.XReadArgs{
 		Streams: []string{key, lastID},
-		Count:   100,
+		Count:   2000,
 		Block:   block,
 	}).Result()
 
