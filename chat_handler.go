@@ -36,6 +36,7 @@ func (h *Handler) ChatRouter(r *gin.RouterGroup) {
 	chatGroup.GET("/sessions/:sessionId", h.GetSessionRun)
 	chatGroup.POST("/sessions/:sessionId/runs/:runId", h.RunEvents)
 	chatGroup.POST("/sessions/:sessionId/cancel/:runId", h.CancelSessionRun)
+	chatGroup.POST("/completions", h.ChatCompletions)
 }
 
 func (h *Handler) CreateRun(c *gin.Context) {

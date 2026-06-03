@@ -170,3 +170,65 @@ data: [DONE]
 | `chat:sessions:{sessionId}:runs:{runId}:events` | Stream | chunk/token 事件流 |
 
 TTL：2 小时。
+
+---
+
+## 接口列表（续）
+
+### 5. Chat Completions（OpenAI 兼容）
+
+**POST** `/api/chat/completions`
+
+OpenAI 兼容的 chat completions 接口，无 session/run 管理，每个请求独立。
+
+**请求体**
+
+```json
+{
+  "model": "gpt-4",
+  "messages": [
+    {"role": "user", "content": "你好"}
+  ],
+  "stream": true
+}
+```
+
+**响应（stream: true）**
+
+SSE 流，格式与 OpenAI Chat Completions 完全一致：
+
+```
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1748937600,"model":"gpt-4","choices":[{"index":0,"delta":{"content":"你"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1748937600,"model":"gpt-4","choices":[{"index":0,"delta":{"content":"好"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1748937600,"model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+```
+
+**响应（stream: false）**
+
+```json
+{
+  "id": "chatcmpl-xxx",
+  "object": "chat.completion",
+  "created": 1748937600,
+  "model": "gpt-4",
+  "choices": [
+    {
+      "index": 0,
+      "message": {"role": "assistant", "content": "你好！"},
+      "finish_reason": "stop"
+    }
+  ]
+}
+```
+
+**说明**
+
+- 不需要 sessionId / runId
+- 不保存任何状态，请求结束后即结束
+- 支持 `stream: true` / `stream: false`
+- `model` 字段可选，默认取环境变量 `MODEL_NAME`
+- 内部复用 Eino Agent，支持 tool 调用
