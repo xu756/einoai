@@ -37,6 +37,7 @@ func main() {
 	h := NewHandler(context.Background(), client)
 	// chat
 	h.ChatRouter(api)
+	h.UseChatRouter(api)
 	// Start server on port 8080 (default)
 	// Server will listen on 0.0.0.0:8080 (localhost:8080 on Windows)
 	engine.Run()
