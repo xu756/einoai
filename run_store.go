@@ -208,3 +208,45 @@ func (s *RunStore) ReadAfter(
 
 	return out, nil
 }
+
+// ReadAIStream 从 Redis Stream 读取 AISDK 格式事件，供 SSE 使用。
+// 每次调用阻塞 block 时长，无新事件则超时返回。
+func (s *RunStore) ReadAIStream(
+	ctx context.Context,
+	sessionID string,
+	runID string,
+	lastID string,
+	block time.Duration,
+) ([]RunEvent, error) {
+	if lastID == "" {
+		lastID = "0-0"
+	}
+
+	key := runEventsKey(sessionID, runID)
+
+	streams, err := s.rdb.XRead(ctx, &redis.XReadArgs{
+		Streams: []string{key, lastID},
+		Count:   100,
+		Block:   block,
+	}).Result()
+
+	if err == redis.Nil {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var out []RunEvent
+	for _, st := range streams {
+		for _, msg := range st.Messages {
+			data, _ := msg.Values["data"].(string)
+			out = append(out, RunEvent{
+				ID:   msg.ID,
+				Data: data,
+			})
+		}
+	}
+
+	return out, nil
+}

@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -24,7 +27,6 @@ type AgentManager struct {
 	model      model.ToolCallingChatModel
 	runMu      sync.Mutex
 	runCancels map[string]context.CancelFunc
-	runIters   map[string]*adk.AsyncIterator[*adk.AgentEvent]
 }
 
 func NewAgentManager(ctx context.Context, rdb *redis.Client) (*AgentManager, error) {
@@ -33,6 +35,7 @@ func NewAgentManager(ctx context.Context, rdb *redis.Client) (*AgentManager, err
 		BaseURL: os.Getenv("OPENAI_BASE_URL"),
 		Model:   os.Getenv("MODEL_NAME"),
 	})
+
 	if err != nil {
 		return nil, err
 	}
@@ -41,7 +44,6 @@ func NewAgentManager(ctx context.Context, rdb *redis.Client) (*AgentManager, err
 		model:      cm,
 		runStore:   NewRunStore(rdb),
 		runCancels: make(map[string]context.CancelFunc),
-		runIters:   make(map[string]*adk.AsyncIterator[*adk.AgentEvent]),
 	}, nil
 }
 
@@ -121,12 +123,8 @@ func newRunID() string {
 	return hex.EncodeToString(b)
 }
 
-func (m *AgentManager) StartRun(
-	ctx context.Context,
-	sessionID string,
-	message string,
-	kind AgentKind,
-) (string, error) {
+// StartRun creates a run for OpenAI API protocol.
+func (m *AgentManager) StartRun(ctx context.Context, sessionID string, message string, kind AgentKind) (string, error) {
 	runID := newRunID()
 
 	if err := m.runStore.InitRun(ctx, sessionID, runID, message); err != nil {
@@ -141,6 +139,7 @@ func (m *AgentManager) StartRun(
 	return runID, nil
 }
 
+// CancelSessionRun cancels the current run for a session by runId.
 func (m *AgentManager) CancelSessionRun(ctx context.Context, sessionID string, runID string) (*RunMeta, bool, error) {
 	run, err := m.runStore.GetCurrentRun(ctx, sessionID)
 	if err != nil {
@@ -173,12 +172,38 @@ func (m *AgentManager) CancelSessionRun(ctx context.Context, sessionID string, r
 	return run, true, nil
 }
 
-func (m *AgentManager) StartAIRun(
-	ctx context.Context,
-	sessionID string,
-	message string,
-	kind AgentKind,
-) (string, error) {
+func (m *AgentManager) registerRunCancel(runID string, cancel context.CancelFunc) {
+	m.runMu.Lock()
+	defer m.runMu.Unlock()
+	if m.runCancels == nil {
+		m.runCancels = make(map[string]context.CancelFunc)
+	}
+	m.runCancels[runID] = cancel
+}
+
+func (m *AgentManager) unregisterRunCancel(runID string) {
+	m.runMu.Lock()
+	defer m.runMu.Unlock()
+	delete(m.runCancels, runID)
+}
+
+func (m *AgentManager) cancelActiveRun(runID string) bool {
+	m.runMu.Lock()
+	cancel := m.runCancels[runID]
+	m.runMu.Unlock()
+	if cancel == nil {
+		return false
+	}
+	cancel()
+	return true
+}
+
+func isTerminalRunStatus(status RunStatus) bool {
+	return status == RunStatusDone || status == RunStatusError || status == RunStatusCanceled
+}
+
+// StartAIRun creates a run for AI SDK protocol.
+func (m *AgentManager) StartAIRun(ctx context.Context, sessionID string, message string, kind AgentKind) (string, error) {
 	runID := newRunID()
 
 	if err := m.runStore.InitRun(ctx, sessionID, runID, message); err != nil {
@@ -193,142 +218,7 @@ func (m *AgentManager) StartAIRun(
 	return runID, nil
 }
 
-func (m *AgentManager) GetAIRunIterator(ctx context.Context, runID string) (*adk.AsyncIterator[*adk.AgentEvent], error) {
-	m.runMu.Lock()
-	iter := m.runIters[runID]
-	m.runMu.Unlock()
-
-	if iter != nil {
-		return iter, nil
-	}
-
-	run, err := m.runStore.GetRun(ctx, "", runID)
-	if err != nil {
-		return nil, err
-	}
-	if run == nil || isTerminalRunStatus(run.Status) {
-		return nil, nil
-	}
-	return nil, nil
-}
-
-func (m *AgentManager) registerRunIter(runID string, iter *adk.AsyncIterator[*adk.AgentEvent]) {
-	m.runMu.Lock()
-	defer m.runMu.Unlock()
-	if m.runIters == nil {
-		m.runIters = make(map[string]*adk.AsyncIterator[*adk.AgentEvent])
-	}
-	m.runIters[runID] = iter
-}
-
-func (m *AgentManager) unregisterRunIter(runID string) {
-	m.runMu.Lock()
-	defer m.runMu.Unlock()
-	delete(m.runIters, runID)
-}
-
-func (m *AgentManager) executeAIRun(
-	ctx context.Context,
-	cancel context.CancelFunc,
-	sessionID string,
-	runID string,
-	message string,
-	kind AgentKind,
-) {
-	defer cancel()
-	defer m.unregisterRunCancel(runID)
-	defer m.unregisterRunIter(runID)
-
-	_ = m.runStore.SetRunStatus(ctx, sessionID, runID, RunStatusRunning)
-
-	var (
-		ag  adk.Agent
-		err error
-	)
-
-	switch kind {
-	case AgentKindDeep:
-		ag, err = m.NewDeepAgent(ctx)
-	default:
-		ag, err = m.NewChatModelAgent(ctx)
-	}
-
-	if err != nil {
-		if errors.Is(ctx.Err(), context.Canceled) {
-			m.finishRunCanceled(sessionID, runID)
-			return
-		}
-		m.writeRunError(context.Background(), sessionID, runID, err)
-		return
-	}
-
-	runner := m.NewRunner(ctx, ag)
-	iter := runner.Query(ctx, message)
-
-	m.registerRunIter(runID, iter)
-
-	// 流式输出复用 Redis sink 保证事件不丢，同时 iterator 供 SSE 读取
-	sink := &RedisOpenAISink{
-		store:     m.runStore,
-		sessionID: sessionID,
-		runID:     runID,
-	}
-
-	modelName := os.Getenv("MODEL_NAME")
-	if modelName == "" {
-		modelName = "GPT-4"
-	}
-
-	if err := streamOpenAICompatibleToSink(ctx, sink, iter, modelName); err != nil {
-		if errors.Is(err, context.Canceled) {
-			m.finishRunCanceled(sessionID, runID)
-			return
-		}
-		if errors.Is(err, context.DeadlineExceeded) {
-			m.writeRunError(context.Background(), sessionID, runID, err)
-			return
-		}
-		_ = m.runStore.SetRunStatus(context.Background(), sessionID, runID, RunStatusError)
-		return
-	}
-
-	_ = m.runStore.SetRunStatus(context.Background(), sessionID, runID, RunStatusDone)
-}
-
-func (m *AgentManager) registerRunCancel(runID string, cancel context.CancelFunc) {
-	m.runMu.Lock()
-	defer m.runMu.Unlock()
-
-	if m.runCancels == nil {
-		m.runCancels = make(map[string]context.CancelFunc)
-	}
-	m.runCancels[runID] = cancel
-}
-
-func (m *AgentManager) unregisterRunCancel(runID string) {
-	m.runMu.Lock()
-	defer m.runMu.Unlock()
-
-	delete(m.runCancels, runID)
-}
-
-func (m *AgentManager) cancelActiveRun(runID string) bool {
-	m.runMu.Lock()
-	cancel := m.runCancels[runID]
-	m.runMu.Unlock()
-
-	if cancel == nil {
-		return false
-	}
-
-	cancel()
-	return true
-}
-
-func isTerminalRunStatus(status RunStatus) bool {
-	return status == RunStatusDone || status == RunStatusError || status == RunStatusCanceled
-}
-
+// executeRun runs the agent for OpenAI API protocol (writes OpenAI SSE to Redis).
 func (m *AgentManager) executeRun(
 	ctx context.Context,
 	cancel context.CancelFunc,
@@ -359,7 +249,6 @@ func (m *AgentManager) executeRun(
 			m.finishRunCanceled(sessionID, runID)
 			return
 		}
-
 		m.writeRunError(context.Background(), sessionID, runID, err)
 		return
 	}
@@ -387,12 +276,268 @@ func (m *AgentManager) executeRun(
 			m.writeRunError(context.Background(), sessionID, runID, err)
 			return
 		}
-
 		_ = m.runStore.SetRunStatus(context.Background(), sessionID, runID, RunStatusError)
 		return
 	}
 
 	_ = m.runStore.SetRunStatus(context.Background(), sessionID, runID, RunStatusDone)
+}
+
+// executeAIRun runs the agent for AI SDK protocol (writes AISDK SSE to Redis).
+func (m *AgentManager) executeAIRun(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	sessionID string,
+	runID string,
+	message string,
+	kind AgentKind,
+) {
+	defer cancel()
+	defer m.unregisterRunCancel(runID)
+
+	_ = m.runStore.SetRunStatus(ctx, sessionID, runID, RunStatusRunning)
+
+	var (
+		ag  adk.Agent
+		err error
+	)
+
+	switch kind {
+	case AgentKindDeep:
+		ag, err = m.NewDeepAgent(ctx)
+	default:
+		ag, err = m.NewChatModelAgent(ctx)
+	}
+
+	if err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			m.finishRunCanceled(sessionID, runID)
+			return
+		}
+		m.writeRunError(context.Background(), sessionID, runID, err)
+		return
+	}
+
+	runner := m.NewRunner(ctx, ag)
+	iter := runner.Query(ctx, message)
+
+	aisdkSink := &RedisAISDKSink{
+		store:     m.runStore,
+		sessionID: sessionID,
+		runID:     runID,
+	}
+
+	if err := m.streamAISDKToSink(ctx, iter, aisdkSink); err != nil {
+		if errors.Is(err, context.Canceled) {
+			m.finishRunCanceled(sessionID, runID)
+			return
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			m.writeRunError(context.Background(), sessionID, runID, err)
+			return
+		}
+		_ = m.runStore.SetRunStatus(context.Background(), sessionID, runID, RunStatusError)
+		return
+	}
+
+	_ = m.runStore.SetRunStatus(context.Background(), sessionID, runID, RunStatusDone)
+}
+
+// streamAISDKToSink writes AISDK format events from the iterator to the sink.
+func (m *AgentManager) streamAISDKToSink(ctx context.Context, iter *adk.AsyncIterator[*adk.AgentEvent], sink AISDKSink) error {
+	state := &useChatStreamState{
+		messageID:         fmt.Sprintf("msg_%d", time.Now().UnixNano()),
+		textID:            fmt.Sprintf("text_%d", time.Now().UnixNano()),
+		reasoningID:       fmt.Sprintf("reasoning_%d", time.Now().UnixNano()),
+		toolCalls:         make(map[string]*toolCallState),
+		toolCallIndexToID: make(map[int]string),
+	}
+
+	sink.WritePart(map[string]any{"type": "start", "messageId": state.messageID})
+	sink.WritePart(map[string]any{"type": "start-step"})
+	state.stepStarted = true
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		event, ok := iter.Next()
+		if !ok {
+			finishOpenBlocksSink(sink, state)
+			sink.WritePart(map[string]any{"type": "finish-step"})
+			sink.WritePart(map[string]any{"type": "finish"})
+			sink.Done()
+			return nil
+		}
+		if event == nil {
+			continue
+		}
+		if event.Err != nil {
+			sink.WritePart(map[string]any{"type": "error", "errorText": event.Err.Error()})
+			sink.WritePart(map[string]any{"type": "finish"})
+			sink.Done()
+			return event.Err
+		}
+		if event.Output == nil || event.Output.MessageOutput == nil {
+			continue
+		}
+
+		mv := event.Output.MessageOutput
+		if mv.IsStreaming && mv.MessageStream != nil {
+			for {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				msg, err := mv.MessageStream.Recv()
+				if err != nil {
+					if err == io.EOF {
+						break
+					}
+					sink.WritePart(map[string]any{"type": "error", "errorText": err.Error()})
+					sink.Done()
+					return err
+				}
+				if msg == nil {
+					continue
+				}
+				writeEinoMsgAsAISDKPartsSink(sink, state, msg)
+			}
+			continue
+		}
+		if mv.Message != nil {
+			writeEinoMsgAsAISDKPartsSink(sink, state, mv.Message)
+		}
+	}
+}
+
+func finishOpenBlocksSink(sink AISDKSink, state *useChatStreamState) {
+	if state.reasoningStarted {
+		sink.WritePart(map[string]any{"type": "reasoning-end", "id": state.reasoningID})
+		state.reasoningStarted = false
+	}
+	if state.textStarted {
+		sink.WritePart(map[string]any{"type": "text-end", "id": state.textID})
+		state.textStarted = false
+	}
+}
+
+func writeEinoMsgAsAISDKPartsSink(sink AISDKSink, state *useChatStreamState, msg *schema.Message) {
+	if msg == nil {
+		return
+	}
+	if msg.ReasoningContent != "" {
+		if !state.reasoningStarted {
+			sink.WritePart(map[string]any{"type": "reasoning-start", "id": state.reasoningID})
+			state.reasoningStarted = true
+		}
+		sink.WritePart(map[string]any{"type": "reasoning-delta", "id": state.reasoningID, "delta": msg.ReasoningContent})
+	}
+	if msg.Content != "" && msg.Role != schema.Tool {
+		if !state.textStarted {
+			sink.WritePart(map[string]any{"type": "text-start", "id": state.textID})
+			state.textStarted = true
+		}
+		sink.WritePart(map[string]any{"type": "text-delta", "id": state.textID, "delta": msg.Content})
+	}
+	if len(msg.ToolCalls) > 0 {
+		for i, tc := range msg.ToolCalls {
+			index := i
+			if tc.Index != nil {
+				index = *tc.Index
+			}
+			callID := tc.ID
+			if callID != "" {
+				state.toolCallIndexToID[index] = callID
+			}
+			if callID == "" {
+				if savedID, ok := state.toolCallIndexToID[index]; ok && savedID != "" {
+					callID = savedID
+				}
+			}
+			if callID == "" {
+				callID = fmt.Sprintf("tool_call_%d", index)
+				state.toolCallIndexToID[index] = callID
+			}
+			st := state.toolCalls[callID]
+			if st == nil {
+				st = &toolCallState{ID: callID}
+				state.toolCalls[callID] = st
+			}
+			if tc.Function.Name != "" {
+				st.Name = tc.Function.Name
+			}
+			if st.Name == "" {
+				st.Name = "tool"
+			}
+			if !st.Started {
+				sink.WritePart(map[string]any{"type": "tool-input-start", "toolCallId": st.ID, "toolName": st.Name})
+				st.Started = true
+			}
+			if tc.Function.Arguments != "" {
+				st.InputText.WriteString(tc.Function.Arguments)
+				sink.WritePart(map[string]any{"type": "tool-input-delta", "toolCallId": st.ID, "inputTextDelta": tc.Function.Arguments})
+			}
+		}
+	}
+	if msg.Role == schema.Tool {
+		callID := msg.ToolCallID
+		if callID == "" {
+			callID = fmt.Sprintf("tool_call_%d", len(state.toolCalls))
+		}
+		st := state.toolCalls[callID]
+		if st == nil {
+			st = &toolCallState{ID: callID, Name: msg.ToolName}
+			state.toolCalls[callID] = st
+		}
+		if msg.ToolName != "" {
+			st.Name = msg.ToolName
+		}
+		if st.Name == "" {
+			st.Name = "tool"
+		}
+		if !st.Available {
+			writeToolAvailableSink(sink, st)
+		}
+		sink.WritePart(map[string]any{"type": "tool-output-available", "toolCallId": st.ID, "output": parseMaybeJSON(msg.Content)})
+	}
+	if msg.ResponseMeta != nil {
+		if msg.ResponseMeta.FinishReason == "tool_calls" {
+			finishOpenBlocksSink(sink, state)
+			for _, st := range state.toolCalls {
+				if st.Started && !st.Available {
+					writeToolAvailableSink(sink, st)
+				}
+			}
+			sink.WritePart(map[string]any{"type": "finish-step"})
+			sink.WritePart(map[string]any{"type": "start-step"})
+			state.stepStarted = true
+			state.textID = fmt.Sprintf("text_%d", time.Now().UnixNano())
+			state.reasoningID = fmt.Sprintf("reasoning_%d", time.Now().UnixNano())
+			state.textStarted = false
+			state.reasoningStarted = false
+		}
+		if msg.ResponseMeta.Usage != nil || msg.ResponseMeta.FinishReason != "" {
+			sink.WritePart(map[string]any{
+				"type": "data-usage",
+				"data": map[string]any{
+					"finishReason": msg.ResponseMeta.FinishReason,
+					"usage":        convertEinoUsageToAISDKUsage(msg.ResponseMeta.Usage),
+				},
+			})
+		}
+	}
+}
+
+func writeToolAvailableSink(sink AISDKSink, st *toolCallState) {
+	inputText := st.InputText.String()
+	sink.WritePart(map[string]any{
+		"type":       "tool-input-available",
+		"toolCallId": st.ID,
+		"toolName":   st.Name,
+		"input":      parseMaybeJSON(inputText),
+	})
+	st.Available = true
 }
 
 func (m *AgentManager) writeRunError(ctx context.Context, sessionID, runID string, err error) {

@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/adk"
 
@@ -131,7 +134,7 @@ func (h *Handler) GetAISessionRun(c *gin.Context) {
 }
 
 // RunAIEvents SSE 订阅指定 run 的 AISDK Data Stream Protocol 事件流。
-// 带上 runId 防止订阅到其他 run。
+// 从 Redis Stream 读取事件，支持断点续读。
 func (h *Handler) RunAIEvents(c *gin.Context) {
 	if h.AgentManager == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "agent manager is not initialized"})
@@ -146,6 +149,17 @@ func (h *Handler) RunAIEvents(c *gin.Context) {
 	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	c.Writer.Header().Set("x-vercel-ai-ui-message-stream", "v1")
+
+	lastID := c.Query("after")
+	if lastID == "" {
+		lastID = c.Query("lastEventId")
+	}
+	if lastID == "" {
+		lastID = c.GetHeader("Last-Event-ID")
+	}
+	if lastID == "" {
+		lastID = "0-0"
+	}
 
 	ctx := c.Request.Context()
 
@@ -163,17 +177,38 @@ func (h *Handler) RunAIEvents(c *gin.Context) {
 		return
 	}
 
-	iter, err := h.AgentManager.GetAIRunIterator(ctx, runID)
-	if err != nil {
-		h.writeAIDoneWithError(c, err)
-		return
-	}
-	if iter == nil {
-		h.writeAIDone(c)
-		return
-	}
+	// 从 Redis Stream 持续读取 AISDK 事件
+	h.streamFromRedis(c, ctx, sessionID, runID, lastID)
+}
 
-	streamAISDKDataProtocol(c, iter)
+func (h *Handler) streamFromRedis(c *gin.Context, ctx context.Context, sessionID, runID, lastID string) {
+	for {
+		events, err := h.AgentManager.runStore.ReadAIStream(ctx, sessionID, runID, lastID, 15*time.Second)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			h.writeAIDoneWithError(c, err)
+			return
+		}
+		if len(events) == 0 {
+			_, _ = fmt.Fprint(c.Writer, ": ping\n\n")
+			c.Writer.Flush()
+			continue
+		}
+		for _, ev := range events {
+			if ev.ID != "" {
+				_, _ = fmt.Fprintf(c.Writer, "id: %s\n", ev.ID)
+			}
+			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", ev.Data)
+			lastID = ev.ID
+			if ev.Data == "[DONE]" {
+				c.Writer.Flush()
+				return
+			}
+		}
+		c.Writer.Flush()
+	}
 }
 
 // CancelAISessionRun 取消指定 run，只对当前 session 的 current run 生效。
