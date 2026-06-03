@@ -176,6 +176,49 @@ func streamAISDKDataProtocol(c *gin.Context, iter *adk.AsyncIterator[*adk.AgentE
 	streamAISDKDataProtocolWithSink(c, iter, nil)
 }
 
+func createAISDKFinishEvent(finishReason string, usage *schema.TokenUsage) map[string]any {
+	if finishReason == "" {
+		finishReason = "stop"
+	}
+
+	res := map[string]any{
+		"type":         "finish",
+		"finishReason": finishReason,
+	}
+
+	if usage != nil {
+		// Construct the specific structure requested by user
+		u := map[string]any{
+			"inputTokens":       usage.PromptTokens,
+			"outputTokens":      usage.CompletionTokens,
+			"totalTokens":       usage.TotalTokens,
+			"cachedInputTokens": usage.PromptTokenDetails.CachedTokens,
+		}
+
+		// Add details if available
+		inputDetails := map[string]any{
+			"cacheReadTokens": usage.PromptTokenDetails.CachedTokens,
+			"noCacheTokens":   usage.PromptTokens - usage.PromptTokenDetails.CachedTokens,
+		}
+		u["inputTokenDetails"] = inputDetails
+
+		outputDetails := map[string]any{
+			"textTokens":      usage.CompletionTokens - usage.CompletionTokensDetails.ReasoningTokens,
+			"reasoningTokens": usage.CompletionTokensDetails.ReasoningTokens,
+		}
+		u["outputTokenDetails"] = outputDetails
+		u["reasoningTokens"] = usage.CompletionTokensDetails.ReasoningTokens
+
+		res["messageMetadata"] = map[string]any{
+			"custom": map[string]any{
+				"usage": u,
+			},
+		}
+	}
+
+	return res
+}
+
 // streamAISDKDataProtocolWithSink streams AISDK Data Stream Protocol events.
 // If sink is non-nil, also writes each event to sink (for Redis persistence).
 func streamAISDKDataProtocolWithSink(c *gin.Context, iter *adk.AsyncIterator[*adk.AgentEvent], sink AISDKSink) {
@@ -197,12 +240,15 @@ func streamAISDKDataProtocolWithSink(c *gin.Context, iter *adk.AsyncIterator[*ad
 	writePart(c, sink, map[string]any{"type": "start-step"})
 	state.stepStarted = true
 
+	var lastUsage *schema.TokenUsage
+	var lastFinishReason string
+
 	for {
 		event, ok := iter.Next()
 		if !ok {
 			finishOpenBlocks(c, sink, state)
 			writePart(c, sink, map[string]any{"type": "finish-step"})
-			writePart(c, sink, map[string]any{"type": "finish"})
+			writePart(c, sink, createAISDKFinishEvent(lastFinishReason, lastUsage))
 			writeDone(c, sink)
 			return
 		}
@@ -211,7 +257,7 @@ func streamAISDKDataProtocolWithSink(c *gin.Context, iter *adk.AsyncIterator[*ad
 		}
 		if event.Err != nil {
 			writePart(c, sink, map[string]any{"type": "error", "errorText": event.Err.Error()})
-			writePart(c, sink, map[string]any{"type": "finish"})
+			writePart(c, sink, createAISDKFinishEvent("error", lastUsage))
 			writeDone(c, sink)
 			return
 		}
@@ -234,11 +280,27 @@ func streamAISDKDataProtocolWithSink(c *gin.Context, iter *adk.AsyncIterator[*ad
 				if msg == nil {
 					continue
 				}
+				if msg.ResponseMeta != nil {
+					if msg.ResponseMeta.Usage != nil {
+						lastUsage = msg.ResponseMeta.Usage
+					}
+					if msg.ResponseMeta.FinishReason != "" {
+						lastFinishReason = msg.ResponseMeta.FinishReason
+					}
+				}
 				writeEinoMsgAsAISDKParts(c, sink, state, msg)
 			}
 			continue
 		}
 		if mv.Message != nil {
+			if mv.Message.ResponseMeta != nil {
+				if mv.Message.ResponseMeta.Usage != nil {
+					lastUsage = mv.Message.ResponseMeta.Usage
+				}
+				if mv.Message.ResponseMeta.FinishReason != "" {
+					lastFinishReason = mv.Message.ResponseMeta.FinishReason
+				}
+			}
 			writeEinoMsgAsAISDKParts(c, sink, state, mv.Message)
 		}
 	}

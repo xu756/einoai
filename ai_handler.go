@@ -196,6 +196,9 @@ func (h *Handler) streamFromRedis(c *gin.Context, ctx context.Context, sessionID
 		state.stepStarted = true
 	}
 
+	var lastUsage *schema.TokenUsage
+	var lastFinishReason string
+
 	for {
 		events, err := h.AgentManager.runStore.ReadAIStream(ctx, sessionID, runID, lastID, 15*time.Second)
 		if ctx.Err() != nil {
@@ -221,6 +224,14 @@ func (h *Handler) streamFromRedis(c *gin.Context, ctx context.Context, sessionID
 			_ = json.Unmarshal([]byte(ev.Data), &se)
 			if se.Type == StreamEventMessage && se.Message != nil {
 				msgs = append(msgs, se.Message)
+				if se.Message.ResponseMeta != nil {
+					if se.Message.ResponseMeta.Usage != nil {
+						lastUsage = se.Message.ResponseMeta.Usage
+					}
+					if se.Message.ResponseMeta.FinishReason != "" {
+						lastFinishReason = se.Message.ResponseMeta.FinishReason
+					}
+				}
 			} else if se.Type == StreamEventError {
 				errText = se.Error
 				done = true
@@ -240,7 +251,7 @@ func (h *Handler) streamFromRedis(c *gin.Context, ctx context.Context, sessionID
 		if done {
 			finishOpenBlocks(c, nil, state)
 			writePart(c, nil, map[string]any{"type": "finish-step"})
-			writePart(c, nil, map[string]any{"type": "finish"})
+			writePart(c, nil, createAISDKFinishEvent(lastFinishReason, lastUsage))
 			h.writeAIDone(c)
 			return
 		}
