@@ -24,6 +24,7 @@ type AgentManager struct {
 	model      model.ToolCallingChatModel
 	runMu      sync.Mutex
 	runCancels map[string]context.CancelFunc
+	runIters   map[string]*adk.AsyncIterator[*adk.AgentEvent]
 }
 
 func NewAgentManager(ctx context.Context, rdb *redis.Client) (*AgentManager, error) {
@@ -40,6 +41,7 @@ func NewAgentManager(ctx context.Context, rdb *redis.Client) (*AgentManager, err
 		model:      cm,
 		runStore:   NewRunStore(rdb),
 		runCancels: make(map[string]context.CancelFunc),
+		runIters:   make(map[string]*adk.AsyncIterator[*adk.AgentEvent]),
 	}, nil
 }
 
@@ -169,6 +171,128 @@ func (m *AgentManager) CancelSessionRun(ctx context.Context, sessionID string, r
 	}
 	run.Status = RunStatusCanceled
 	return run, true, nil
+}
+
+func (m *AgentManager) StartAIRun(
+	ctx context.Context,
+	sessionID string,
+	message string,
+	kind AgentKind,
+) (string, error) {
+	runID := newRunID()
+
+	if err := m.runStore.InitRun(ctx, sessionID, runID, message); err != nil {
+		return "", err
+	}
+
+	runCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	m.registerRunCancel(runID, cancel)
+
+	go m.executeAIRun(runCtx, cancel, sessionID, runID, message, kind)
+
+	return runID, nil
+}
+
+func (m *AgentManager) GetAIRunIterator(ctx context.Context, runID string) (*adk.AsyncIterator[*adk.AgentEvent], error) {
+	m.runMu.Lock()
+	iter := m.runIters[runID]
+	m.runMu.Unlock()
+
+	if iter != nil {
+		return iter, nil
+	}
+
+	run, err := m.runStore.GetRun(ctx, "", runID)
+	if err != nil {
+		return nil, err
+	}
+	if run == nil || isTerminalRunStatus(run.Status) {
+		return nil, nil
+	}
+	return nil, nil
+}
+
+func (m *AgentManager) registerRunIter(runID string, iter *adk.AsyncIterator[*adk.AgentEvent]) {
+	m.runMu.Lock()
+	defer m.runMu.Unlock()
+	if m.runIters == nil {
+		m.runIters = make(map[string]*adk.AsyncIterator[*adk.AgentEvent])
+	}
+	m.runIters[runID] = iter
+}
+
+func (m *AgentManager) unregisterRunIter(runID string) {
+	m.runMu.Lock()
+	defer m.runMu.Unlock()
+	delete(m.runIters, runID)
+}
+
+func (m *AgentManager) executeAIRun(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	sessionID string,
+	runID string,
+	message string,
+	kind AgentKind,
+) {
+	defer cancel()
+	defer m.unregisterRunCancel(runID)
+	defer m.unregisterRunIter(runID)
+
+	_ = m.runStore.SetRunStatus(ctx, sessionID, runID, RunStatusRunning)
+
+	var (
+		ag  adk.Agent
+		err error
+	)
+
+	switch kind {
+	case AgentKindDeep:
+		ag, err = m.NewDeepAgent(ctx)
+	default:
+		ag, err = m.NewChatModelAgent(ctx)
+	}
+
+	if err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			m.finishRunCanceled(sessionID, runID)
+			return
+		}
+		m.writeRunError(context.Background(), sessionID, runID, err)
+		return
+	}
+
+	runner := m.NewRunner(ctx, ag)
+	iter := runner.Query(ctx, message)
+
+	m.registerRunIter(runID, iter)
+
+	// 流式输出复用 Redis sink 保证事件不丢，同时 iterator 供 SSE 读取
+	sink := &RedisOpenAISink{
+		store:     m.runStore,
+		sessionID: sessionID,
+		runID:     runID,
+	}
+
+	modelName := os.Getenv("MODEL_NAME")
+	if modelName == "" {
+		modelName = "GPT-4"
+	}
+
+	if err := streamOpenAICompatibleToSink(ctx, sink, iter, modelName); err != nil {
+		if errors.Is(err, context.Canceled) {
+			m.finishRunCanceled(sessionID, runID)
+			return
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			m.writeRunError(context.Background(), sessionID, runID, err)
+			return
+		}
+		_ = m.runStore.SetRunStatus(context.Background(), sessionID, runID, RunStatusError)
+		return
+	}
+
+	_ = m.runStore.SetRunStatus(context.Background(), sessionID, runID, RunStatusDone)
 }
 
 func (m *AgentManager) registerRunCancel(runID string, cancel context.CancelFunc) {
