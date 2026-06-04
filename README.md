@@ -339,13 +339,3 @@ go test ./...
 ```
 
 当前测试覆盖了 Redis 存储读取与 `<think>` reasoning 拆分等核心行为。
-
-## 发布与版本
-
-建议业务方通过 Go module 版本管理引用本包：
-
-```bash
-go get github.com/xu756/einoai@<version>
-```
-
-发布版本时应保证公开类型、协议输出格式和 Redis 事件语义的兼容性。
