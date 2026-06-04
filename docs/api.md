@@ -1,395 +1,582 @@
-# Chat API
+# enio-ai 接口文档
 
-流生命周期在后端，前端只订阅 SSE。Session 不在后端保存，前端自己维护。
+本文档以当前 Gin 示例程序为准。核心包 `enioai` 不依赖 Gin，HTTP 路由只是在根目录示例程序中演示如何组合 `enioai/aisdk` 和 `enioai/openai` 协议包。
+
+## 基本信息
+
+默认服务地址：
+
+```text
+http://127.0.0.1:8080
+```
+
+健康检查：
+
+```http
+GET /ping
+```
+
+响应：
+
+```json
+{
+  "message": "pong"
+}
+```
+
+当前约定：
+
+- 一个 `sessionId` 同一时间只对应一个当前 run。
+- 查询、订阅、取消都以 `sessionId` 为主，路径中的 `runId` 只用于兼容前端路由形态，核心服务不会用它查找 run。
+- 创建新 run 会覆盖该 session 的 current run 指针。
+- Redis 保存 run meta、status、events、current run、error、usage、metadata。
+- `agent` 不保存到 Redis，由业务方每次创建 run 时传入。
+- 请求只使用标准 message 数组，不支持旧的根级 `message` 字段。
+- 不会只取最后一条 user message，也不会生成默认兜底消息。
 
 ## Run 状态
 
-| 状态 | 含义 |
-|------|------|
-| `running` | 运行中 |
-| `canceling` | 取消中 |
-| `done` | 正常结束 |
-| `error` | 出错 |
-| `canceled` | 被取消 |
+| 状态 | 说明 |
+| --- | --- |
+| `queued` | 已创建，等待后台执行 |
+| `running` | 正在执行 |
+| `completed` | 正常完成 |
+| `cancelled` | 已取消 |
+| `failed` | 执行失败 |
 
----
-
-## 接口列表
-
-### 1. 创建 Run
-
-**POST** `/api/chat/sessions/:sessionId`
-
-发送消息，启动一个 Eino Agent Run。
-
-**请求体**
+Run 信息结构：
 
 ```json
 {
-  "message": "你好",
-  "agent": "chat"  // 可选，默认 "chat"
-}
-```
-
-**响应 202**
-
-```json
-{
-  "sessionId": "test111",
-  "runId": "54ea1a309853ccd1da77bd68b1296c84",
-  "status": "running"
-}
-```
-
----
-
-### 2. 查询 Session 当前 Run
-
-**GET** `/api/chat/sessions/:sessionId`
-
-查询该 session 当前是否有一个 active run，用于前端判断是否需要订阅 SSE。
-
-**响应 200**
-
-有 active run：
-
-```json
-{
-  "sessionId": "test111",
-  "run": {
-    "runId": "54ea1a309853ccd1da77bd68b1296c84",
-    "message": "你好",
-    "status": "running",
-    "createdAt": 1748937600000
+  "session_id": "session_001",
+  "runId": "run_xxx",
+  "status": "running",
+  "created_at": "2026-06-04T15:30:00+08:00",
+  "updated_at": "2026-06-04T15:30:01+08:00",
+  "error": "",
+  "metadata": {
+    "protocol": "aisdk",
+    "model": "gpt-4o"
   }
 }
 ```
 
-无 active run（run 已结束或从未创建）：
+## 断点恢复
+
+订阅 SSE 时支持以下任一方式指定游标：
+
+```text
+?after=<event_id>
+?lastEventId=<event_id>
+Last-Event-ID: <event_id>
+```
+
+服务端会从 `AfterEventID` 之后继续推送 Redis 中尚未消费的事件。客户端断开后，可使用最后收到的 SSE `id` 继续订阅。
+
+## AI SDK / assistant-ui 协议
+
+路由前缀：
+
+```text
+/api/usechat
+```
+
+### 直接补全并返回流
+
+```http
+POST /api/usechat/completions
+```
+
+请求体：
 
 ```json
 {
-  "sessionId": "test111",
-  "run": null
+  "model": "gpt-4o",
+  "messages": [
+    {
+      "role": "user",
+      "parts": [
+        {
+          "type": "text",
+          "text": "帮我介绍一下这个项目"
+        }
+      ]
+    }
+  ],
+  "params": {
+    "traceId": "trace_001"
+  }
 }
 ```
 
-> run 结束后 current run 指针会被自动清除，不再回放旧 Stream。
+响应为 AI SDK UI Message Stream SSE。
 
----
+### 创建 run
 
-### 3. 订阅 Run 事件流
-
-**POST** `/api/chat/sessions/:sessionId/runs/:runId`
-
-SSE 订阅该 run 的 chunk 事件流。必须带上正确的 `runId`。
-
-**Query 参数**
-
-| 参数 | 说明 |
-|------|------|
-| `after` | 从指定 eventId 之后开始读，支持 SSE `Last-Event-ID` header |
-| `lastEventId` | 同 `after` |
-| `Last-Event-ID` | 同 `after`（header） |
-
-**SSE 事件**
-
+```http
+POST /api/usechat/sessions/:sessionId
 ```
+
+请求体：
+
+```json
+{
+  "model": "gpt-4o",
+  "messages": [
+    {
+      "role": "user",
+      "parts": [
+        {
+          "type": "text",
+          "text": "北京今天适合出门吗？"
+        }
+      ]
+    }
+  ],
+  "params": {
+    "source": "web"
+  }
+}
+```
+
+响应：
+
+```json
+{
+  "sessionId": "session_001",
+  "runId": "run_xxx",
+  "status": "queued"
+}
+```
+
+### 获取当前 run
+
+```http
+GET /api/usechat/sessions/:sessionId
+```
+
+响应：
+
+```json
+{
+  "run": {
+    "session_id": "session_001",
+    "runId": "run_xxx",
+    "status": "running",
+    "created_at": "2026-06-04T15:30:00+08:00",
+    "updated_at": "2026-06-04T15:30:01+08:00",
+    "metadata": {
+      "protocol": "aisdk",
+      "model": "gpt-4o",
+      "params": {
+        "source": "web"
+      }
+    }
+  }
+}
+```
+
+### 订阅 run 事件
+
+```http
+POST /api/usechat/sessions/:sessionId/runs/:runId
+```
+
+响应头：
+
+```text
+Content-Type: text/event-stream; charset=utf-8
+x-vercel-ai-ui-message-stream: v1
+```
+
+SSE 示例：
+
+```text
 id: 1748937600001-0
-data: {"choices":[{"delta":{"content":"你"}}]}
+data: {"type":"start","messageId":"msg_run_xxx"}
 
 id: 1748937600001-1
-data: {"choices":[{"delta":{"content":"好"}}]}
+data: {"type":"start-step"}
 
 id: 1748937600001-2
+data: {"type":"reasoning-start","id":"reasoning_run_xxx_0"}
+
+id: 1748937600001-3
+data: {"type":"reasoning-delta","id":"reasoning_run_xxx_0","delta":"先分析问题。"}
+
+id: 1748937600001-4
+data: {"type":"reasoning-end","id":"reasoning_run_xxx_0"}
+
+id: 1748937600001-5
+data: {"type":"text-start","id":"text_run_xxx_0"}
+
+id: 1748937600001-6
+data: {"type":"text-delta","id":"text_run_xxx_0","delta":"今天北京天气不错。"}
+
+id: 1748937600001-7
+data: {"type":"text-end","id":"text_run_xxx_0"}
+
+id: 1748937600001-8
+data: {"type":"finish-step"}
+
+id: 1748937600001-9
+data: {"type":"message-metadata","messageMetadata":{"modelId":"gpt-4o"}}
+
+id: 1748937600001-10
+data: {"type":"finish","finishReason":"stop","messageMetadata":{"custom":{"usage":{"inputTokens":100,"outputTokens":50,"totalTokens":150,"cachedInputTokens":0,"inputTokenDetails":{"cacheReadTokens":0,"noCacheTokens":100},"outputTokenDetails":{"textTokens":45,"reasoningTokens":5},"reasoningTokens":5}}}}
+
 data: [DONE]
 ```
 
-**规则**
+工具调用事件：
 
-- `runId` 必须是该 session 的当前 active run，否则直接返回 `data: [DONE]`，不会串流到其他 run。
-- run 结束后 current run 被清掉，同一 `runId` 再订阅也只会收到 `data: [DONE]`。
-- 无数据时定期发送 `: ping` 心跳，防止连接断开。
-- 出现错误时发送 error 对象后结束流。
+```text
+data: {"type":"tool-input-start","toolCallId":"call_001","toolName":"get_weather"}
+data: {"type":"tool-input-delta","toolCallId":"call_001","inputTextDelta":"{\"location\":\"北京\"}"}
+data: {"type":"tool-input-available","toolCallId":"call_001","toolName":"get_weather","input":{"location":"北京"}}
+data: {"type":"tool-output-available","toolCallId":"call_001","output":{"temperature":26}}
+```
 
----
+说明：
 
-### 4. 取消 Run
+- usage 只在最终 `finish` 事件返回。
+- `message-metadata.messageMetadata.modelId` 来自 `MODEL_NAME` 环境变量。
+- 中间工具步骤会发送 `finish-step` 后再发送新的 `start-step`。
+- AI SDK finish reason 使用 `tool-calls`、`content-filter` 这种连字符格式。
 
-**POST** `/api/chat/sessions/:sessionId/cancel/:runId`
+### 取消当前 run
 
-取消指定 run，只对当前 session 的当前 active run 生效。
+```http
+POST /api/usechat/sessions/:sessionId/cancel
+```
 
-**响应 202**（成功取消）
+响应：
 
 ```json
 {
-  "sessionId": "test111",
-  "run": {
-    "runId": "54ea1a309853ccd1da77bd68b1296c84",
-    "status": "canceled"
-  }
+  "ok": true
 }
 ```
 
-**响应 200**（无 active run 或 runId 不匹配）
+## OpenAI-compatible 协议
+
+路由前缀：
+
+```text
+/api/v1
+```
+
+另外保留一个本地调试兼容路径：
+
+```http
+POST /api/chat/completions
+```
+
+### Chat Completions
+
+```http
+POST /api/v1/chat/completions
+```
+
+请求体支持 OpenAI-compatible chat completions 常见字段：
 
 ```json
 {
-  "sessionId": "test111",
-  "run": null
-}
-```
-
----
-
-## 前端使用流程
-
-```
-进入页面
-    │
-    ├─ GET /sessions/:sessionId
-    │      ├─ run != null → 订阅 POST /sessions/:sessionId/runs/:runId
-    │      └─ run == null → 不订阅，显示空界面
-    │
-发送消息
-    │
-    └─ POST /sessions/:sessionId
-           ├─ 收到 202 + runId
-           └─ 订阅 POST /sessions/:sessionId/runs/:runId
-
-页面切换/刷新
-    │
-    └─ GET /sessions/:sessionId（重新查询状态）
-```
-
-## Redis 存储结构
-
-| Key | 类型 | 说明 |
-|-----|------|------|
-| `chat:sessions:{sessionId}:current_run` | String | 指向当前 runId |
-| `chat:sessions:{sessionId}:runs:{runId}:meta` | Hash | run 元数据（sessionId, runId, message, status, createdAt） |
-| `chat:sessions:{sessionId}:runs:{runId}:events` | Stream | chunk/token 事件流 |
-
-TTL：2 小时。
-
----
-
-## 接口列表（续）
-
-### 5. Chat Completions（OpenAI 兼容）
-
-**POST** `/api/chat/completions`
-
-OpenAI 兼容的 chat completions 接口，无 session/run 管理，每个请求独立。
-
-**请求体**
-
-```json
-{
-  "model": "gpt-4",
+  "model": "gpt-4o",
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
   "messages": [
-    {"role": "user", "content": "你好"}
+    {
+      "role": "system",
+      "content": "你是一个简洁的助手。"
+    },
+    {
+      "role": "user",
+      "content": "你好"
+    }
   ],
-  "stream": true
+  "temperature": 0.7,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "查询天气"
+      }
+    }
+  ],
+  "tool_choice": "auto"
 }
 ```
 
-**响应（stream: true）**
+Session ID 解析顺序：
 
-SSE 流，格式与 OpenAI Chat Completions 完全一致：
+1. Header `X-Session-ID`
+2. Query `sessionId`
+3. `openai-<model>`
+4. `openai`
 
-```
-data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1748937600,"model":"gpt-4","choices":[{"index":0,"delta":{"content":"你"},"finish_reason":null}]}
+#### 流式响应
 
-data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1748937600,"model":"gpt-4","choices":[{"index":0,"delta":{"content":"好"},"finish_reason":null}]}
+```text
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000,"model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
 
-data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1748937600,"model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+id: 1748937600001-0
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"你好"},"finish_reason":null}]}
+
+id: 1748937600001-1
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":5}}}
 
 data: [DONE]
 ```
 
-**响应（stream: false）**
+Reasoning 输出：
+
+```text
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000,"model":"gpt-4o","choices":[{"index":0,"delta":{"reasoning_content":"先分析问题。"},"finish_reason":null}]}
+```
+
+Tool call 输出：
+
+```text
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000,"model":"gpt-4o","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_001","type":"function","function":{"name":"get_weather","arguments":"{\"location\":\"北京\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+```
+
+说明：
+
+- OpenAI 流不输出非标准 `tool_result` 字段。
+- usage 只在最终非 `tool_calls` 的 `finish` chunk 返回。
+- OpenAI finish reason 使用 `tool_calls`、`content_filter` 这种下划线格式。
+
+#### 非流式响应
+
+当 `stream` 为 `false` 或不传时，接口会聚合文本内容后返回：
 
 ```json
 {
   "id": "chatcmpl-xxx",
   "object": "chat.completion",
-  "created": 1748937600,
-  "model": "gpt-4",
+  "created": 1780560000,
+  "model": "gpt-4o",
   "choices": [
     {
       "index": 0,
-      "message": {"role": "assistant", "content": "你好！"},
+      "message": {
+        "role": "assistant",
+        "content": "你好，有什么可以帮你？"
+      },
       "finish_reason": "stop"
     }
   ]
 }
 ```
 
-**说明**
+### 创建 run
 
-- 不需要 sessionId / runId
-- 不保存任何状态，请求结束后即结束
-- 支持 `stream: true` / `stream: false`
-- `model` 字段可选，默认取环境变量 `MODEL_NAME`
-- 内部复用 Eino Agent，支持 tool 调用
+```http
+POST /api/v1/sessions/:sessionId
+```
 
----
+请求体同 `/api/v1/chat/completions`，但只创建后台 run，不直接返回模型内容。
 
-## AI SDK useChat 风格接口
-
-### 概述
-
-AI SDK 的 `useChat` / `useCompletion` 规范要求 SSE 流使用 **AI SDK Data Stream Protocol**，与 OpenAI 兼容格式不同。这套接口与上方 OpenAI 协议路由一一对应：
-
-| 用途 | OpenAI 协议 | AI SDK 协议 |
-|------|------------|------------|
-| 创建 Run | `POST /sessions/:sessionId` | `POST /usechat/sessions/:sessionId` |
-| 查询当前 Run | `GET /sessions/:sessionId` | `GET /usechat/sessions/:sessionId` |
-| 订阅事件流 | `POST /sessions/:sessionId/runs/:runId` | `POST /usechat/sessions/:sessionId/runs/:runId` |
-| 取消 Run | `POST /sessions/:sessionId/cancel/:runId` | `POST /usechat/sessions/:sessionId/cancel/:runId` |
-
-**主要区别：**
-
-- SSE 流格式为 AI SDK Data Stream Protocol（带 `x-vercel-ai-ui-message-stream: v1` header）
-- 请求体支持 AI SDK 标准的 `messages` 数组（每条 message 可含 `parts[]`）或兼容字段 `message`
-- `params.type` 可传 `"deep"` 切换 deep agent
-
----
-
-### 1. 创建 AI Run
-
-**POST** `/api/chat/usechat/sessions/:sessionId`
-
-**请求体**
+响应：
 
 ```json
 {
-  "messages": [
-    {"role": "user", "content": "帮我解释 React hooks"}
-  ],
-  "message": "帮我解释 React hooks",
-  "params": {
-    "type": "chat"
-  }
+  "sessionId": "session_001",
+  "runId": "run_xxx",
+  "status": "queued"
 }
 ```
 
-- `messages`：AI SDK 标准格式，`parts[]` 也支持
-- `message`：兼容字段，与 `messages` 共存时优先取 `message`
-- `params.type`：可选，`"deep"` 启用 deep agent
+### 获取当前 run
 
-**响应 202**
-
-```json
-{
-  "sessionId": "test111",
-  "runId": "54ea1a309853ccd1da77bd68b1296c84",
-  "status": "running"
-}
+```http
+GET /api/v1/sessions/:sessionId
 ```
 
----
-
-### 2. 查询 AI Session 当前 Run
-
-**GET** `/api/chat/usechat/sessions/:sessionId`
-
-**响应 200**
-
-有 active run：
+响应：
 
 ```json
 {
-  "sessionId": "test111",
   "run": {
-    "runId": "54ea1a309853ccd1da77bd68b1296c84",
-    "message": "帮我解释 React hooks",
+    "session_id": "session_001",
+    "runId": "run_xxx",
     "status": "running",
-    "createdAt": 1748937600000
+    "created_at": "2026-06-04T15:30:00+08:00",
+    "updated_at": "2026-06-04T15:30:01+08:00",
+    "metadata": {
+      "protocol": "openai",
+      "model": "gpt-4o"
+    }
   }
 }
 ```
 
-无 active run：
+### 订阅 run 事件
+
+```http
+POST /api/v1/sessions/:sessionId/runs/:runId
+```
+
+Query 参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `model` | 可选，用于 OpenAI chunk 的 `model` 字段 |
+| `after` | 从指定 event id 之后恢复 |
+| `lastEventId` | 同 `after` |
+
+也支持 Header：
+
+```text
+Last-Event-ID: <event_id>
+```
+
+响应为 OpenAI-compatible streaming chunk，格式同 `/api/v1/chat/completions` 的流式响应。
+
+### 取消当前 run
+
+```http
+POST /api/v1/sessions/:sessionId/cancel
+```
+
+响应：
 
 ```json
 {
-  "sessionId": "test111",
-  "run": null
+  "ok": true
 }
 ```
 
----
+## 核心包接口
 
-### 3. 订阅 AI Run 事件流
+业务方可以不使用示例 Gin handler，直接组合协议包函数。
 
-**POST** `/api/chat/usechat/sessions/:sessionId/runs/:runId`
-
-**SSE 事件（AI SDK Data Stream Protocol）**
-
-```
-x-vercel-ai-ui-message-stream: v1
-Content-Type: text/event-stream
+```go
+svc := enioai.NewService(model, redisClient)
 ```
 
-```
-data: {"type":"start","messageId":"msg_xxx"}
+核心接口：
 
-data: {"type":"start-step"}
-
-data: {"type":"reasoning-start","id":"reasoning_xxx"}
-data: {"type":"reasoning-delta","id":"reasoning_xxx","delta":"思考内容..."}
-data: {"type":"reasoning-end","id":"reasoning_xxx"}
-
-data: {"type":"text-start","id":"text_xxx"}
-data: {"type":"text-delta","id":"text_xxx","delta":"这是"}
-data: {"type":"text-delta","id":"text_xxx","delta":"回复内容"}
-data: {"type":"text-end","id":"text_xxx"}
-
-data: {"type":"tool-input-start","toolCallId":"tool_call_0","toolName":"get_weather"}
-data: {"type":"tool-input-delta","toolCallId":"tool_call_0","inputTextDelta":"{"}
-data: {"type":"tool-input-available","toolCallId":"tool_call_0","toolName":"get_weather","input":{"location":"北京"}}
-data: {"type":"tool-output-available","toolCallId":"tool_call_0","output":{"weather":"晴天"}}
-
-data: {"type":"data-usage","data":{"finishReason":"stop","usage":{"promptTokens":100,"completionTokens":50,"totalTokens":150}}}
-
-data: {"type":"finish-step"}
-data: {"type":"finish"}
-
-data: [DONE]
-```
-
-**规则**
-
-- `runId` 必须是该 session 的当前 active run
-- run 结束后 current run 被清掉，同 `runId` 再订阅直接 `data: [DONE]`
-- 无数据时定期发送 `: ping` 心跳
-
----
-
-### 4. 取消 AI Run
-
-**POST** `/api/chat/usechat/sessions/:sessionId/cancel/:runId`
-
-**响应 202**（成功取消）
-
-```json
-{
-  "sessionId": "test111",
-  "run": {
-    "runId": "54ea1a309853ccd1da77bd68b1296c84",
-    "status": "canceled"
-  }
+```go
+type Service interface {
+    CreateRun(ctx context.Context, req CreateRunRequest) (*RunInfo, error)
+    GetRun(ctx context.Context, sessionID string) (*RunInfo, error)
+    CancelRun(ctx context.Context, sessionID string) error
+    SubscribeEvents(ctx context.Context, req SubscribeRequest) (EventStream, error)
 }
 ```
 
-**响应 200**（无 active run 或 runId 不匹配）
+AI SDK 组合示例：
 
-```json
-{
-  "sessionId": "test111",
-  "run": null
+```go
+func (h *Handler) CreateAIRun(c *gin.Context) {
+    sessionID := c.Param("sessionId")
+
+    req, err := aisdk.BindCreateRunRequest(c)
+    if err != nil {
+        aisdk.WriteError(c, err)
+        return
+    }
+
+    messages, err := aisdk.ToSchemaMessages(req)
+    if err != nil {
+        aisdk.WriteError(c, err)
+        return
+    }
+
+    agent, err := h.ResolveAgent(c.Request.Context(), sessionID, messages)
+    if err != nil {
+        aisdk.WriteError(c, err)
+        return
+    }
+
+    run, err := h.AIService.CreateRun(c.Request.Context(), enioai.CreateRunRequest{
+        SessionID: sessionID,
+        Messages:  messages,
+        Agent:     agent,
+    })
+    if err != nil {
+        aisdk.WriteError(c, err)
+        return
+    }
+
+    aisdk.WriteCreateRunResponse(c, run)
 }
 ```
+
+OpenAI 组合示例：
+
+```go
+func (h *Handler) ChatCompletions(c *gin.Context) {
+    req, err := openai.BindChatCompletionsRequest(c)
+    if err != nil {
+        openai.WriteError(c, err)
+        return
+    }
+
+    messages, err := openai.ToSchemaMessages(req)
+    if err != nil {
+        openai.WriteError(c, err)
+        return
+    }
+
+    agent, err := h.ResolveOpenAIAgent(c.Request.Context(), req, messages)
+    if err != nil {
+        openai.WriteError(c, err)
+        return
+    }
+
+    run, err := h.AIService.CreateRun(c.Request.Context(), enioai.CreateRunRequest{
+        SessionID: openai.ResolveSessionID(c, req),
+        Messages:  messages,
+        Agent:     agent,
+    })
+    if err != nil {
+        openai.WriteError(c, err)
+        return
+    }
+
+    stream, err := h.AIService.SubscribeEvents(c.Request.Context(), enioai.SubscribeRequest{
+        SessionID: run.SessionID,
+        AfterEventID: openaiLastEventID(c),
+    })
+    if err != nil {
+        openai.WriteError(c, err)
+        return
+    }
+    defer stream.Close()
+
+    openai.WriteChatCompletionStream(c, req, stream)
+}
+```
+
+## 内部事件类型
+
+核心 `RunEvent` 是协议无关事件，AI SDK 和 OpenAI 包负责把它转换成各自协议。
+
+| 类型 | 说明 |
+| --- | --- |
+| `run_created` | run 已创建 |
+| `run_started` | run 开始执行 |
+| `text_start` | 文本块开始 |
+| `text_delta` | 文本增量 |
+| `text_end` | 文本块结束 |
+| `reasoning_start` | reasoning 块开始 |
+| `reasoning_delta` | reasoning 增量 |
+| `reasoning_end` | reasoning 块结束 |
+| `tool_call` | 工具调用 |
+| `tool_result` | 工具结果 |
+| `error` | 错误 |
+| `finish` | 当前步骤或最终完成 |
+
+Reasoning 处理规则：
+
+- 如果 Eino 返回 `ReasoningContent`，转换为 reasoning 事件。
+- 如果模型把 `<think>...</think>` 混在 `Content` 中，输出转换层拆分为 reasoning 事件和 text 事件。
+- 流式分片里 `<think>` 标签被拆开时也会正确拼接和拆分。
