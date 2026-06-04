@@ -28,8 +28,8 @@ func NewHandler(ctx context.Context, rdb *redis.Client) *Handler {
 }
 
 type CreateRunRequest struct {
-	Message string    `json:"message" binding:"required"`
-	Agent   AgentKind `json:"agent,omitempty"` // "chat" or "deep"
+	Messages []*schema.Message `json:"messages" binding:"required"`
+	Agent    AgentKind         `json:"agent,omitempty"` // "chat" or "deep"
 }
 
 func (h *Handler) ChatRouter(r *gin.RouterGroup) {
@@ -59,7 +59,7 @@ func (h *Handler) CreateRun(c *gin.Context) {
 		req.Agent = AgentKindChat
 	}
 
-	runID, err := h.AgentManager.StartRun(c.Request.Context(), sessionID, req.Message, req.Agent)
+	runID, err := h.AgentManager.StartRun(c.Request.Context(), sessionID, req.Messages, req.Agent)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -229,9 +229,10 @@ func (h *Handler) RunEvents(c *gin.Context) {
 		}
 
 		if len(msgs) > 0 {
-			mergedMsg, _ := schema.ConcatMessages(msgs)
-			sink := &HTTPResponseWriterSink{c: c, lastEvID: lastEvID}
-			_ = writeEinoMessageAsOpenAIChunkToSink(ctx, sink, id, created, modelName, mergedMsg)
+			for _, msg := range msgs {
+				sink := &HTTPResponseWriterSink{c: c, lastEvID: lastEvID}
+				_ = writeEinoMessageAsOpenAIChunkToSink(ctx, sink, id, created, modelName, msg)
+			}
 		}
 		if errText != "" {
 			errObj := map[string]any{

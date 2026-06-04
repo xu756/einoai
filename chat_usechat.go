@@ -32,8 +32,11 @@ type UseChatMessage struct {
 }
 
 type UseChatPart struct {
-	Type string `json:"type,omitempty"`
-	Text string `json:"text,omitempty"`
+	Type      string `json:"type,omitempty"`
+	Text      string `json:"text,omitempty"`
+	URL       string `json:"url,omitempty"`
+	MediaType string `json:"mediaType,omitempty"`
+	Filename  string `json:"filename,omitempty"`
 }
 
 type useChatStreamState struct {
@@ -96,13 +99,10 @@ func (h *Handler) ChatUseChatStream(c *gin.Context) {
 		return
 	}
 
-	message := extractUseChatLastUserText(req)
-	if strings.TrimSpace(message) == "" {
-		message = defaultUseChatMessage
-	}
+	messages := extractUseChatMessages(req)
 
 	runner := h.AgentManager.NewRunner(ctx, ag)
-	iter := runner.Query(ctx, message, adk.AgentRunOption{})
+	iter := runner.Run(ctx, messages, adk.AgentRunOption{})
 
 	streamAISDKDataProtocolWithSink(c, iter, nil)
 }
@@ -126,13 +126,10 @@ func (h *Handler) DeepChatUseChatStream(c *gin.Context) {
 		return
 	}
 
-	message := extractUseChatLastUserText(req)
-	if strings.TrimSpace(message) == "" {
-		message = defaultUseChatMessage
-	}
+	messages := extractUseChatMessages(req)
 
 	runner := h.AgentManager.NewRunner(ctx, ag)
-	iter := runner.Query(ctx, message)
+	iter := runner.Run(ctx, messages)
 
 	streamAISDKDataProtocolWithSink(c, iter, nil)
 }
@@ -146,29 +143,172 @@ func bindUseChatRequest(c *gin.Context) (UseChatRequest, bool) {
 	return req, true
 }
 
-func extractUseChatLastUserText(req UseChatRequest) string {
-	if strings.TrimSpace(req.Message) != "" {
-		return req.Message
-	}
-	for i := len(req.Messages) - 1; i >= 0; i-- {
-		msg := req.Messages[i]
-		if msg.Role != "user" {
-			continue
+func extractUseChatMessages(req UseChatRequest) []*schema.Message {
+	var msgs []*schema.Message
+	for _, m := range req.Messages {
+		var role schema.RoleType
+		switch m.Role {
+		case "assistant":
+			role = schema.Assistant
+		case "system":
+			role = schema.System
+		case "tool":
+			role = schema.Tool
+		default:
+			role = schema.User
 		}
-		if strings.TrimSpace(msg.Content) != "" {
-			return msg.Content
-		}
-		var sb strings.Builder
-		for _, part := range msg.Parts {
-			if part.Type == "text" {
-				sb.WriteString(part.Text)
+
+		var multiParts []schema.MessageInputPart
+		hasTextPart := false
+
+		for _, part := range m.Parts {
+			switch part.Type {
+			case "text":
+				hasTextPart = true
+				multiParts = append(multiParts, schema.MessageInputPart{
+					Type: schema.ChatMessagePartTypeText,
+					Text: part.Text,
+				})
+			case "file", "image":
+				var partType schema.ChatMessagePartType
+				if strings.HasPrefix(part.MediaType, "image/") {
+					partType = schema.ChatMessagePartType("image_url")
+				} else if strings.HasPrefix(part.MediaType, "audio/") {
+					partType = schema.ChatMessagePartType("audio_url")
+				} else if strings.HasPrefix(part.MediaType, "video/") {
+					partType = schema.ChatMessagePartType("video_url")
+				} else {
+					partType = schema.ChatMessagePartType("file_url")
+				}
+
+				urlStr := part.URL
+				var base64Data *string
+				mimeType := part.MediaType
+
+				if strings.HasPrefix(urlStr, "data:") {
+					commaIdx := strings.Index(urlStr, ",")
+					if commaIdx != -1 {
+						b64 := urlStr[commaIdx+1:]
+						base64Data = &b64
+						meta := urlStr[5:commaIdx]
+						semiIdx := strings.Index(meta, ";")
+						if semiIdx != -1 {
+							mimeType = meta[:semiIdx]
+						} else {
+							mimeType = meta
+						}
+						urlStr = ""
+					}
+				}
+
+				common := schema.MessagePartCommon{
+					MIMEType: mimeType,
+				}
+				if urlStr != "" {
+					common.URL = &urlStr
+				}
+				if base64Data != nil {
+					common.Base64Data = base64Data
+				}
+
+				var inputPart schema.MessageInputPart
+				inputPart.Type = partType
+				if partType == schema.ChatMessagePartType("image_url") {
+					inputPart.Image = &schema.MessageInputImage{
+						MessagePartCommon: common,
+					}
+				} else if partType == schema.ChatMessagePartType("audio_url") {
+					inputPart.Audio = &schema.MessageInputAudio{
+						MessagePartCommon: common,
+					}
+				} else if partType == schema.ChatMessagePartType("video_url") {
+					inputPart.Video = &schema.MessageInputVideo{
+						MessagePartCommon: common,
+					}
+				} else {
+					inputPart.File = &schema.MessageInputFile{
+						MessagePartCommon: common,
+						Name:              part.Filename,
+					}
+				}
+				multiParts = append(multiParts, inputPart)
 			}
 		}
-		if strings.TrimSpace(sb.String()) != "" {
-			return sb.String()
+
+		msg := &schema.Message{
+			Role: role,
 		}
+
+		if len(multiParts) > 0 && (role == schema.User || role == schema.Tool) {
+			if m.Content != "" && !hasTextPart {
+				multiParts = append([]schema.MessageInputPart{{
+					Type: schema.ChatMessagePartTypeText,
+					Text: m.Content,
+				}}, multiParts...)
+			}
+			msg.UserInputMultiContent = multiParts
+			msg.Content = m.Content
+		} else if len(multiParts) > 0 && role == schema.Assistant {
+			var outParts []schema.MessageOutputPart
+			if m.Content != "" && !hasTextPart {
+				outParts = append(outParts, schema.MessageOutputPart{
+					Type: schema.ChatMessagePartTypeText,
+					Text: m.Content,
+				})
+			}
+			for _, p := range multiParts {
+				outPart := schema.MessageOutputPart{
+					Type: p.Type,
+					Text: p.Text,
+				}
+				if p.Image != nil {
+					outPart.Image = &schema.MessageOutputImage{
+						MessagePartCommon: p.Image.MessagePartCommon,
+					}
+				} else if p.Audio != nil {
+					outPart.Audio = &schema.MessageOutputAudio{
+						MessagePartCommon: p.Audio.MessagePartCommon,
+					}
+				} else if p.Video != nil {
+					outPart.Video = &schema.MessageOutputVideo{
+						MessagePartCommon: p.Video.MessagePartCommon,
+					}
+				}
+				outParts = append(outParts, outPart)
+			}
+			msg.AssistantGenMultiContent = outParts
+			msg.Content = m.Content
+		} else {
+			if m.Content == "" && hasTextPart {
+				var sb strings.Builder
+				for _, p := range m.Parts {
+					if p.Type == "text" {
+						sb.WriteString(p.Text)
+					}
+				}
+				msg.Content = sb.String()
+			} else {
+				msg.Content = m.Content
+			}
+		}
+
+		msgs = append(msgs, msg)
 	}
-	return ""
+
+	if len(msgs) == 0 && req.Message != "" {
+		msgs = append(msgs, &schema.Message{
+			Role:    schema.User,
+			Content: req.Message,
+		})
+	}
+
+	if len(msgs) == 0 {
+		msgs = append(msgs, &schema.Message{
+			Role:    schema.User,
+			Content: defaultUseChatMessage,
+		})
+	}
+	return msgs
 }
 
 // streamAISDKDataProtocol writes AISDK events directly to HTTP SSE response (no Redis).

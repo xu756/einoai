@@ -202,7 +202,7 @@ func TestCreateRunEndpointUsesSessionID(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/api/chat/sessions/session-1",
-		strings.NewReader(`{"message":"hello"}`),
+		strings.NewReader(`{"messages":[{"role":"user","content":"hello"}]}`),
 	)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -307,7 +307,7 @@ func TestOldRunIDRoutesAreRemoved(t *testing.T) {
 		path   string
 		body   io.Reader
 	}{
-		{method: http.MethodPost, path: "/api/chat/sessions/session-1/messages", body: strings.NewReader(`{"message":"hello"}`)},
+		{method: http.MethodPost, path: "/api/chat/sessions/session-1/messages", body: strings.NewReader(`{"messages":[{"role":"user","content":"hello"}]}`)},
 		{method: http.MethodPost, path: "/api/chat/sessions/session-1/runs"},
 		{method: http.MethodGet, path: "/api/chat/sessions/session-1/runs/run-1/events"},
 		{method: http.MethodPost, path: "/api/chat/sessions/session-1/cancel"},

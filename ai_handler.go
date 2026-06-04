@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/cloudwego/eino/adk"
@@ -48,10 +47,7 @@ func (h *Handler) UseChatCompletions(c *gin.Context) {
 		agentKind = AgentKindDeep
 	}
 
-	message := extractUseChatLastUserText(req)
-	if strings.TrimSpace(message) == "" {
-		message = "你好"
-	}
+	messages := extractUseChatMessages(req)
 
 	ctx := c.Request.Context()
 
@@ -71,7 +67,7 @@ func (h *Handler) UseChatCompletions(c *gin.Context) {
 	}
 
 	runner := h.AgentManager.NewRunner(ctx, ag)
-	iter := runner.Query(ctx, message)
+	iter := runner.Run(ctx, messages)
 
 	streamAISDKDataProtocol(c, iter)
 }
@@ -95,12 +91,9 @@ func (h *Handler) CreateAIRun(c *gin.Context) {
 		agentKind = AgentKindDeep
 	}
 
-	message := extractUseChatLastUserText(req)
-	if strings.TrimSpace(message) == "" {
-		message = "你好"
-	}
+	messages := extractUseChatMessages(req)
 
-	runID, err := h.AgentManager.StartAIRun(c.Request.Context(), sessionID, message, agentKind)
+	runID, err := h.AgentManager.StartAIRun(c.Request.Context(), sessionID, messages, agentKind)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -242,8 +235,9 @@ func (h *Handler) streamFromRedis(c *gin.Context, ctx context.Context, sessionID
 		}
 
 		if len(msgs) > 0 {
-			mergedMsg, _ := schema.ConcatMessages(msgs)
-			writeEinoMsgAsAISDKParts(c, nil, state, mergedMsg)
+			for _, msg := range msgs {
+				writeEinoMsgAsAISDKParts(c, nil, state, msg)
+			}
 		}
 		if errText != "" {
 			writePart(c, nil, map[string]any{"type": "error", "errorText": errText})

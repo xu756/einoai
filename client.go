@@ -124,17 +124,22 @@ func newRunID() string {
 }
 
 // StartRun creates a run for OpenAI API protocol.
-func (m *AgentManager) StartRun(ctx context.Context, sessionID string, message string, kind AgentKind) (string, error) {
+func (m *AgentManager) StartRun(ctx context.Context, sessionID string, messages []*schema.Message, kind AgentKind) (string, error) {
 	runID := newRunID()
 
-	if err := m.runStore.InitRun(ctx, sessionID, runID, message); err != nil {
+	lastMessageText := ""
+	if len(messages) > 0 {
+		lastMessageText = messages[len(messages)-1].Content
+	}
+
+	if err := m.runStore.InitRun(ctx, sessionID, runID, lastMessageText); err != nil {
 		return "", err
 	}
 
 	runCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	m.registerRunCancel(runID, cancel)
 
-	go m.executeRun(runCtx, cancel, sessionID, runID, message, kind)
+	go m.executeRun(runCtx, cancel, sessionID, runID, messages, kind)
 
 	return runID, nil
 }
@@ -203,17 +208,22 @@ func isTerminalRunStatus(status RunStatus) bool {
 }
 
 // StartAIRun creates a run for AI SDK protocol.
-func (m *AgentManager) StartAIRun(ctx context.Context, sessionID string, message string, kind AgentKind) (string, error) {
+func (m *AgentManager) StartAIRun(ctx context.Context, sessionID string, messages []*schema.Message, kind AgentKind) (string, error) {
 	runID := newRunID()
 
-	if err := m.runStore.InitRun(ctx, sessionID, runID, message); err != nil {
+	lastMessageText := ""
+	if len(messages) > 0 {
+		lastMessageText = messages[len(messages)-1].Content
+	}
+
+	if err := m.runStore.InitRun(ctx, sessionID, runID, lastMessageText); err != nil {
 		return "", err
 	}
 
 	runCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	m.registerRunCancel(runID, cancel)
 
-	go m.executeAIRun(runCtx, cancel, sessionID, runID, message, kind)
+	go m.executeAIRun(runCtx, cancel, sessionID, runID, messages, kind)
 
 	return runID, nil
 }
@@ -224,7 +234,7 @@ func (m *AgentManager) executeRun(
 	cancel context.CancelFunc,
 	sessionID string,
 	runID string,
-	message string,
+	messages []*schema.Message,
 	kind AgentKind,
 ) {
 	defer cancel()
@@ -254,7 +264,7 @@ func (m *AgentManager) executeRun(
 	}
 
 	runner := m.NewRunner(ctx, ag)
-	iter := runner.Query(ctx, message)
+	iter := runner.Run(ctx, messages)
 
 	if err := m.streamToRedis(ctx, iter, sessionID, runID); err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -278,11 +288,11 @@ func (m *AgentManager) executeAIRun(
 	cancel context.CancelFunc,
 	sessionID string,
 	runID string,
-	message string,
+	messages []*schema.Message,
 	kind AgentKind,
 ) {
 	// Re-uses the exact same logic as executeRun because both now just stream raw schema.Message to Redis
-	m.executeRun(ctx, cancel, sessionID, runID, message, kind)
+	m.executeRun(ctx, cancel, sessionID, runID, messages, kind)
 }
 
 func (m *AgentManager) streamToRedis(ctx context.Context, iter *adk.AsyncIterator[*adk.AgentEvent], sessionID, runID string) error {
