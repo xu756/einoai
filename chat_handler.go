@@ -147,7 +147,7 @@ func (h *Handler) RunEvents(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
-	run, err := h.AgentManager.runStore.GetCurrentRun(ctx, sessionID)
+	run, err := h.AgentManager.runStore.GetRunForEvents(ctx, sessionID, runID)
 	if err != nil {
 		errObj := map[string]any{
 			"error": map[string]any{
@@ -161,10 +161,6 @@ func (h *Handler) RunEvents(c *gin.Context) {
 		return
 	}
 	if run == nil {
-		writeSSEDataWithID(c, "", "[DONE]")
-		return
-	}
-	if run.RunID != runID || isTerminalRunStatus(run.Status) {
 		writeSSEDataWithID(c, "", "[DONE]")
 		return
 	}
@@ -203,13 +199,16 @@ func (h *Handler) RunEvents(c *gin.Context) {
 		}
 
 		if len(events) == 0 {
+			if isTerminalRunStatus(run.Status) {
+				writeSSEDataWithID(c, "", "[DONE]")
+				return
+			}
 			// heartbeat，防止 nginx / browser 长时间无数据断开
 			_, _ = fmt.Fprint(c.Writer, ": ping\n\n")
 			c.Writer.Flush()
 			continue
 		}
 
-		var msgs []*schema.Message
 		var lastEvID string
 		var done bool
 		var errText string
@@ -218,7 +217,8 @@ func (h *Handler) RunEvents(c *gin.Context) {
 			var se StreamEvent
 			_ = json.Unmarshal([]byte(ev.Data), &se)
 			if se.Type == StreamEventMessage && se.Message != nil {
-				msgs = append(msgs, se.Message)
+				sink := &HTTPResponseWriterSink{c: c, lastEvID: ev.ID}
+				_ = writeEinoMessageAsOpenAIChunkToSink(ctx, sink, id, created, modelName, se.Message)
 			} else if se.Type == StreamEventError {
 				errText = se.Error
 				done = true
@@ -228,12 +228,6 @@ func (h *Handler) RunEvents(c *gin.Context) {
 			lastEvID = ev.ID
 		}
 
-		if len(msgs) > 0 {
-			for _, msg := range msgs {
-				sink := &HTTPResponseWriterSink{c: c, lastEvID: lastEvID}
-				_ = writeEinoMessageAsOpenAIChunkToSink(ctx, sink, id, created, modelName, msg)
-			}
-		}
 		if errText != "" {
 			errObj := map[string]any{
 				"error": map[string]any{

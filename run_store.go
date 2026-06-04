@@ -147,6 +147,21 @@ func (s *RunStore) GetCurrentRun(ctx context.Context, sessionID string) (*RunMet
 	return run, nil
 }
 
+func (s *RunStore) GetRunForEvents(ctx context.Context, sessionID, runID string) (*RunMeta, error) {
+	current, err := s.GetCurrentRun(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if current != nil {
+		if current.RunID != runID {
+			return nil, nil
+		}
+		return current, nil
+	}
+
+	return s.GetRun(ctx, sessionID, runID)
+}
+
 func runMetaFromHash(values map[string]string) *RunMeta {
 	createdAt, _ := strconv.ParseInt(values["created_at"], 10, 64)
 	updatedAt, _ := strconv.ParseInt(values["updated_at"], 10, 64)
@@ -219,6 +234,37 @@ func (s *RunStore) ReadAfter(
 				Data: data,
 			})
 		}
+	}
+
+	return out, nil
+}
+
+func (s *RunStore) ReadRange(
+	ctx context.Context,
+	sessionID string,
+	runID string,
+	startID string,
+	endID string,
+) ([]RunEvent, error) {
+	if startID == "" {
+		startID = "0-0"
+	}
+	if endID == "" {
+		endID = "+"
+	}
+
+	messages, err := s.rdb.XRange(ctx, runEventsKey(sessionID, runID), startID, endID).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	var out []RunEvent
+	for _, msg := range messages {
+		data, _ := msg.Values["data"].(string)
+		out = append(out, RunEvent{
+			ID:   msg.ID,
+			Data: data,
+		})
 	}
 
 	return out, nil

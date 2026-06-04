@@ -41,6 +41,8 @@ type UseChatPart struct {
 
 type useChatStreamState struct {
 	messageID         string
+	baseID            string
+	stepIndex         int
 	textID            string
 	textStarted       bool
 	reasoningID       string
@@ -56,6 +58,32 @@ type toolCallState struct {
 	InputText strings.Builder
 	Started   bool
 	Available bool
+}
+
+func newUseChatStreamState(baseID string) *useChatStreamState {
+	if baseID == "" {
+		baseID = fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	state := &useChatStreamState{
+		messageID:         "msg_" + baseID,
+		baseID:            baseID,
+		toolCalls:         make(map[string]*toolCallState),
+		toolCallIndexToID: make(map[int]string),
+	}
+	resetUseChatStepIDs(state)
+	return state
+}
+
+func advanceUseChatStep(state *useChatStreamState) {
+	state.stepIndex++
+	resetUseChatStepIDs(state)
+	state.textStarted = false
+	state.reasoningStarted = false
+}
+
+func resetUseChatStepIDs(state *useChatStreamState) {
+	state.textID = fmt.Sprintf("text_%s_%d", state.baseID, state.stepIndex)
+	state.reasoningID = fmt.Sprintf("reasoning_%s_%d", state.baseID, state.stepIndex)
 }
 
 // AISDKSink writes AISDK format events to a destination.
@@ -368,13 +396,7 @@ func streamAISDKDataProtocolWithSink(c *gin.Context, iter *adk.AsyncIterator[*ad
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	c.Writer.Header().Set("x-vercel-ai-ui-message-stream", "v1")
 
-	state := &useChatStreamState{
-		messageID:         fmt.Sprintf("msg_%d", time.Now().UnixNano()),
-		textID:            fmt.Sprintf("text_%d", time.Now().UnixNano()),
-		reasoningID:       fmt.Sprintf("reasoning_%d", time.Now().UnixNano()),
-		toolCalls:         make(map[string]*toolCallState),
-		toolCallIndexToID: make(map[int]string),
-	}
+	state := newUseChatStreamState("")
 
 	writePart(c, sink, map[string]any{"type": "start", "messageId": state.messageID})
 	writePart(c, sink, map[string]any{"type": "start-step"})
@@ -447,22 +469,26 @@ func streamAISDKDataProtocolWithSink(c *gin.Context, iter *adk.AsyncIterator[*ad
 }
 
 func writeEinoMsgAsAISDKParts(c *gin.Context, sink AISDKSink, state *useChatStreamState, msg *schema.Message) {
+	writeEinoMsgAsAISDKPartsWithID(c, sink, state, "", msg)
+}
+
+func writeEinoMsgAsAISDKPartsWithID(c *gin.Context, sink AISDKSink, state *useChatStreamState, id string, msg *schema.Message) {
 	if msg == nil {
 		return
 	}
 	if msg.ReasoningContent != "" {
 		if !state.reasoningStarted {
-			writePart(c, sink, map[string]any{"type": "reasoning-start", "id": state.reasoningID})
+			writePartWithID(c, sink, id, map[string]any{"type": "reasoning-start", "id": state.reasoningID})
 			state.reasoningStarted = true
 		}
-		writePart(c, sink, map[string]any{"type": "reasoning-delta", "id": state.reasoningID, "delta": msg.ReasoningContent})
+		writePartWithID(c, sink, id, map[string]any{"type": "reasoning-delta", "id": state.reasoningID, "delta": msg.ReasoningContent})
 	}
 	if msg.Content != "" && msg.Role != schema.Tool {
 		if !state.textStarted {
-			writePart(c, sink, map[string]any{"type": "text-start", "id": state.textID})
+			writePartWithID(c, sink, id, map[string]any{"type": "text-start", "id": state.textID})
 			state.textStarted = true
 		}
-		writePart(c, sink, map[string]any{"type": "text-delta", "id": state.textID, "delta": msg.Content})
+		writePartWithID(c, sink, id, map[string]any{"type": "text-delta", "id": state.textID, "delta": msg.Content})
 	}
 	if len(msg.ToolCalls) > 0 {
 		for i, tc := range msg.ToolCalls {
@@ -495,12 +521,12 @@ func writeEinoMsgAsAISDKParts(c *gin.Context, sink AISDKSink, state *useChatStre
 				st.Name = "tool"
 			}
 			if !st.Started {
-				writePart(c, sink, map[string]any{"type": "tool-input-start", "toolCallId": st.ID, "toolName": st.Name})
+				writePartWithID(c, sink, id, map[string]any{"type": "tool-input-start", "toolCallId": st.ID, "toolName": st.Name})
 				st.Started = true
 			}
 			if tc.Function.Arguments != "" {
 				st.InputText.WriteString(tc.Function.Arguments)
-				writePart(c, sink, map[string]any{"type": "tool-input-delta", "toolCallId": st.ID, "inputTextDelta": tc.Function.Arguments})
+				writePartWithID(c, sink, id, map[string]any{"type": "tool-input-delta", "toolCallId": st.ID, "inputTextDelta": tc.Function.Arguments})
 			}
 		}
 	}
@@ -521,28 +547,25 @@ func writeEinoMsgAsAISDKParts(c *gin.Context, sink AISDKSink, state *useChatStre
 			st.Name = "tool"
 		}
 		if !st.Available {
-			writeToolAvailable(c, sink, st)
+			writeToolAvailableWithID(c, sink, id, st)
 		}
-		writePart(c, sink, map[string]any{"type": "tool-output-available", "toolCallId": st.ID, "output": parseMaybeJSON(msg.Content)})
+		writePartWithID(c, sink, id, map[string]any{"type": "tool-output-available", "toolCallId": st.ID, "output": parseMaybeJSON(msg.Content)})
 	}
 	if msg.ResponseMeta != nil {
 		if msg.ResponseMeta.FinishReason == "tool_calls" {
-			finishOpenBlocks(c, sink, state)
+			finishOpenBlocksWithID(c, sink, id, state)
 			for _, st := range state.toolCalls {
 				if st.Started && !st.Available {
-					writeToolAvailable(c, sink, st)
+					writeToolAvailableWithID(c, sink, id, st)
 				}
 			}
-			writePart(c, sink, map[string]any{"type": "finish-step"})
-			writePart(c, sink, map[string]any{"type": "start-step"})
+			writePartWithID(c, sink, id, map[string]any{"type": "finish-step"})
+			writePartWithID(c, sink, id, map[string]any{"type": "start-step"})
 			state.stepStarted = true
-			state.textID = fmt.Sprintf("text_%d", time.Now().UnixNano())
-			state.reasoningID = fmt.Sprintf("reasoning_%d", time.Now().UnixNano())
-			state.textStarted = false
-			state.reasoningStarted = false
+			advanceUseChatStep(state)
 		}
 		if msg.ResponseMeta.Usage != nil || msg.ResponseMeta.FinishReason != "" {
-			writePart(c, sink, map[string]any{
+			writePartWithID(c, sink, id, map[string]any{
 				"type": "data-usage",
 				"data": map[string]any{
 					"finishReason": msg.ResponseMeta.FinishReason,
@@ -554,19 +577,27 @@ func writeEinoMsgAsAISDKParts(c *gin.Context, sink AISDKSink, state *useChatStre
 }
 
 func finishOpenBlocks(c *gin.Context, sink AISDKSink, state *useChatStreamState) {
+	finishOpenBlocksWithID(c, sink, "", state)
+}
+
+func finishOpenBlocksWithID(c *gin.Context, sink AISDKSink, id string, state *useChatStreamState) {
 	if state.reasoningStarted {
-		writePart(c, sink, map[string]any{"type": "reasoning-end", "id": state.reasoningID})
+		writePartWithID(c, sink, id, map[string]any{"type": "reasoning-end", "id": state.reasoningID})
 		state.reasoningStarted = false
 	}
 	if state.textStarted {
-		writePart(c, sink, map[string]any{"type": "text-end", "id": state.textID})
+		writePartWithID(c, sink, id, map[string]any{"type": "text-end", "id": state.textID})
 		state.textStarted = false
 	}
 }
 
 func writeToolAvailable(c *gin.Context, sink AISDKSink, st *toolCallState) {
+	writeToolAvailableWithID(c, sink, "", st)
+}
+
+func writeToolAvailableWithID(c *gin.Context, sink AISDKSink, id string, st *toolCallState) {
 	inputText := st.InputText.String()
-	writePart(c, sink, map[string]any{
+	writePartWithID(c, sink, id, map[string]any{
 		"type":       "tool-input-available",
 		"toolCallId": st.ID,
 		"toolName":   st.Name,
@@ -606,12 +637,22 @@ func convertEinoUsageToAISDKUsage(u *schema.TokenUsage) map[string]any {
 
 // writePart writes a single AISDK event to both the sink and the SSE response.
 func writePart(c *gin.Context, sink AISDKSink, part map[string]any) {
+	writePartWithID(c, sink, "", part)
+}
+
+func writePartWithID(c *gin.Context, sink AISDKSink, id string, part map[string]any) {
 	b, err := json.Marshal(part)
 	if err != nil {
 		return
 	}
 	if sink != nil {
 		sink.WritePart(part)
+	}
+	if c == nil {
+		return
+	}
+	if id != "" {
+		_, _ = fmt.Fprintf(c.Writer, "id: %s\n", id)
 	}
 	_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", b)
 	c.Writer.Flush()
@@ -620,6 +661,9 @@ func writePart(c *gin.Context, sink AISDKSink, part map[string]any) {
 func writeDone(c *gin.Context, sink AISDKSink) {
 	if sink != nil {
 		sink.Done()
+	}
+	if c == nil {
+		return
 	}
 	_, _ = fmt.Fprint(c.Writer, "data: [DONE]\n\n")
 	c.Writer.Flush()

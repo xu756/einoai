@@ -169,7 +169,9 @@ func (m *AgentManager) CancelSessionRun(ctx context.Context, sessionID string, r
 		return run, true, nil
 	}
 
-	_, _ = m.runStore.Append(ctx, run.SessionID, run.RunID, "[DONE]")
+	if err := m.appendStreamEvent(ctx, run.SessionID, run.RunID, StreamEvent{Type: StreamEventDone}); err != nil {
+		return nil, false, err
+	}
 	if err := m.runStore.SetRunStatus(ctx, run.SessionID, run.RunID, RunStatusCanceled); err != nil {
 		return nil, false, err
 	}
@@ -303,16 +305,16 @@ func (m *AgentManager) streamToRedis(ctx context.Context, iter *adk.AsyncIterato
 
 		event, ok := iter.Next()
 		if !ok {
-			b, _ := json.Marshal(StreamEvent{Type: StreamEventDone})
-			_, _ = m.runStore.Append(context.Background(), sessionID, runID, string(b))
-			return nil
+			return m.appendStreamEvent(context.Background(), sessionID, runID, StreamEvent{Type: StreamEventDone})
 		}
 		if event == nil {
 			continue
 		}
 		if event.Err != nil {
-			b, _ := json.Marshal(StreamEvent{Type: StreamEventError, Error: event.Err.Error()})
-			_, _ = m.runStore.Append(context.Background(), sessionID, runID, string(b))
+			_ = m.appendStreamEvent(context.Background(), sessionID, runID, StreamEvent{
+				Type:  StreamEventError,
+				Error: event.Err.Error(),
+			})
 			return event.Err
 		}
 		if event.Output == nil || event.Output.MessageOutput == nil {
@@ -330,33 +332,37 @@ func (m *AgentManager) streamToRedis(ctx context.Context, iter *adk.AsyncIterato
 					if err == io.EOF {
 						break
 					}
-					b, _ := json.Marshal(StreamEvent{Type: StreamEventError, Error: err.Error()})
-					_, _ = m.runStore.Append(context.Background(), sessionID, runID, string(b))
+					_ = m.appendStreamEvent(context.Background(), sessionID, runID, StreamEvent{
+						Type:  StreamEventError,
+						Error: err.Error(),
+					})
 					return err
 				}
 				if msg != nil {
-					b, _ := json.Marshal(StreamEvent{Type: StreamEventMessage, Message: msg})
-					_, _ = m.runStore.Append(context.Background(), sessionID, runID, string(b))
+					if err := m.appendStreamEvent(context.Background(), sessionID, runID, StreamEvent{
+						Type:    StreamEventMessage,
+						Message: msg,
+					}); err != nil {
+						return err
+					}
 				}
 			}
 			continue
 		}
 		if mv.Message != nil {
-			b, _ := json.Marshal(StreamEvent{Type: StreamEventMessage, Message: mv.Message})
-			_, _ = m.runStore.Append(context.Background(), sessionID, runID, string(b))
+			if err := m.appendStreamEvent(context.Background(), sessionID, runID, StreamEvent{
+				Type:    StreamEventMessage,
+				Message: mv.Message,
+			}); err != nil {
+				return err
+			}
 		}
 	}
 }
 
 // streamAISDKToSink writes AISDK format events from the iterator to the sink.
 func (m *AgentManager) streamAISDKToSink(ctx context.Context, iter *adk.AsyncIterator[*adk.AgentEvent], sink AISDKSink) error {
-	state := &useChatStreamState{
-		messageID:         fmt.Sprintf("msg_%d", time.Now().UnixNano()),
-		textID:            fmt.Sprintf("text_%d", time.Now().UnixNano()),
-		reasoningID:       fmt.Sprintf("reasoning_%d", time.Now().UnixNano()),
-		toolCalls:         make(map[string]*toolCallState),
-		toolCallIndexToID: make(map[int]string),
-	}
+	state := newUseChatStreamState("")
 
 	sink.WritePart(map[string]any{"type": "start", "messageId": state.messageID})
 	sink.WritePart(map[string]any{"type": "start-step"})
@@ -517,10 +523,7 @@ func writeEinoMsgAsAISDKPartsSink(sink AISDKSink, state *useChatStreamState, msg
 			sink.WritePart(map[string]any{"type": "finish-step"})
 			sink.WritePart(map[string]any{"type": "start-step"})
 			state.stepStarted = true
-			state.textID = fmt.Sprintf("text_%d", time.Now().UnixNano())
-			state.reasoningID = fmt.Sprintf("reasoning_%d", time.Now().UnixNano())
-			state.textStarted = false
-			state.reasoningStarted = false
+			advanceUseChatStep(state)
 		}
 		if msg.ResponseMeta.Usage != nil || msg.ResponseMeta.FinishReason != "" {
 			sink.WritePart(map[string]any{
@@ -546,21 +549,24 @@ func writeToolAvailableSink(sink AISDKSink, st *toolCallState) {
 }
 
 func (m *AgentManager) writeRunError(ctx context.Context, sessionID, runID string, err error) {
-	errObj := map[string]any{
-		"error": map[string]any{
-			"message": err.Error(),
-			"type":    "server_error",
-		},
-	}
-
-	b, _ := json.Marshal(errObj)
-	_, _ = m.runStore.Append(ctx, sessionID, runID, string(b))
-	_, _ = m.runStore.Append(ctx, sessionID, runID, "[DONE]")
+	_ = m.appendStreamEvent(ctx, sessionID, runID, StreamEvent{
+		Type:  StreamEventError,
+		Error: err.Error(),
+	})
 	_ = m.runStore.SetRunStatus(ctx, sessionID, runID, RunStatusError)
 }
 
 func (m *AgentManager) finishRunCanceled(sessionID, runID string) {
 	ctx := context.Background()
-	_, _ = m.runStore.Append(ctx, sessionID, runID, "[DONE]")
+	_ = m.appendStreamEvent(ctx, sessionID, runID, StreamEvent{Type: StreamEventDone})
 	_ = m.runStore.SetRunStatus(ctx, sessionID, runID, RunStatusCanceled)
+}
+
+func (m *AgentManager) appendStreamEvent(ctx context.Context, sessionID, runID string, event StreamEvent) error {
+	b, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	_, err = m.runStore.Append(ctx, sessionID, runID, string(b))
+	return err
 }

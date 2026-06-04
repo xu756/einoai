@@ -157,16 +157,12 @@ func (h *Handler) RunAIEvents(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
-	run, err := h.AgentManager.runStore.GetCurrentRun(ctx, sessionID)
+	run, err := h.AgentManager.runStore.GetRunForEvents(ctx, sessionID, runID)
 	if err != nil {
 		h.writeAIDoneWithError(c, err)
 		return
 	}
-	if run == nil || run.RunID != runID {
-		h.writeAIDone(c)
-		return
-	}
-	if isTerminalRunStatus(run.Status) {
+	if run == nil {
 		h.writeAIDone(c)
 		return
 	}
@@ -176,17 +172,17 @@ func (h *Handler) RunAIEvents(c *gin.Context) {
 }
 
 func (h *Handler) streamFromRedis(c *gin.Context, ctx context.Context, sessionID, runID, lastID string) {
-	state := &useChatStreamState{
-		messageID:         fmt.Sprintf("msg_%d", time.Now().UnixNano()),
-		textID:            fmt.Sprintf("text_%d", time.Now().UnixNano()),
-		reasoningID:       fmt.Sprintf("reasoning_%d", time.Now().UnixNano()),
-		toolCalls:         make(map[string]*toolCallState),
-		toolCallIndexToID: make(map[int]string),
-	}
+	state := newUseChatStreamState(runID)
 	if lastID == "0-0" || lastID == "" {
 		writePart(c, nil, map[string]any{"type": "start", "messageId": state.messageID})
 		writePart(c, nil, map[string]any{"type": "start-step"})
 		state.stepStarted = true
+	} else {
+		state.stepStarted = true
+		if err := h.replayAISDKState(ctx, sessionID, runID, lastID, state); err != nil {
+			h.writeAIDoneWithError(c, err)
+			return
+		}
 	}
 
 	var lastUsage *schema.TokenUsage
@@ -202,12 +198,20 @@ func (h *Handler) streamFromRedis(c *gin.Context, ctx context.Context, sessionID
 			return
 		}
 		if len(events) == 0 {
+			run, runErr := h.AgentManager.runStore.GetRun(ctx, sessionID, runID)
+			if runErr != nil {
+				h.writeAIDoneWithError(c, runErr)
+				return
+			}
+			if run == nil || isTerminalRunStatus(run.Status) {
+				h.writeAIDone(c)
+				return
+			}
 			_, _ = fmt.Fprint(c.Writer, ": ping\n\n")
 			c.Writer.Flush()
 			continue
 		}
 
-		var msgs []*schema.Message
 		var lastEvID string
 		var done bool
 		var errText string
@@ -216,7 +220,6 @@ func (h *Handler) streamFromRedis(c *gin.Context, ctx context.Context, sessionID
 			var se StreamEvent
 			_ = json.Unmarshal([]byte(ev.Data), &se)
 			if se.Type == StreamEventMessage && se.Message != nil {
-				msgs = append(msgs, se.Message)
 				if se.Message.ResponseMeta != nil {
 					if se.Message.ResponseMeta.Usage != nil {
 						lastUsage = se.Message.ResponseMeta.Usage
@@ -225,6 +228,7 @@ func (h *Handler) streamFromRedis(c *gin.Context, ctx context.Context, sessionID
 						lastFinishReason = se.Message.ResponseMeta.FinishReason
 					}
 				}
+				writeEinoMsgAsAISDKPartsWithID(c, nil, state, ev.ID, se.Message)
 			} else if se.Type == StreamEventError {
 				errText = se.Error
 				done = true
@@ -234,18 +238,13 @@ func (h *Handler) streamFromRedis(c *gin.Context, ctx context.Context, sessionID
 			lastEvID = ev.ID
 		}
 
-		if len(msgs) > 0 {
-			for _, msg := range msgs {
-				writeEinoMsgAsAISDKParts(c, nil, state, msg)
-			}
-		}
 		if errText != "" {
-			writePart(c, nil, map[string]any{"type": "error", "errorText": errText})
+			writePartWithID(c, nil, lastEvID, map[string]any{"type": "error", "errorText": errText})
 		}
 		if done {
-			finishOpenBlocks(c, nil, state)
-			writePart(c, nil, map[string]any{"type": "finish-step"})
-			writePart(c, nil, createAISDKFinishEvent(lastFinishReason, lastUsage))
+			finishOpenBlocksWithID(c, nil, lastEvID, state)
+			writePartWithID(c, nil, lastEvID, map[string]any{"type": "finish-step"})
+			writePartWithID(c, nil, lastEvID, createAISDKFinishEvent(lastFinishReason, lastUsage))
 			h.writeAIDone(c)
 			return
 		}
@@ -253,6 +252,23 @@ func (h *Handler) streamFromRedis(c *gin.Context, ctx context.Context, sessionID
 			lastID = lastEvID
 		}
 	}
+}
+
+func (h *Handler) replayAISDKState(ctx context.Context, sessionID, runID, lastID string, state *useChatStreamState) error {
+	events, err := h.AgentManager.runStore.ReadRange(ctx, sessionID, runID, "0-0", lastID)
+	if err != nil {
+		return err
+	}
+	for _, ev := range events {
+		var se StreamEvent
+		if err := json.Unmarshal([]byte(ev.Data), &se); err != nil {
+			continue
+		}
+		if se.Type == StreamEventMessage && se.Message != nil {
+			writeEinoMsgAsAISDKParts(nil, nil, state, se.Message)
+		}
+	}
+	return nil
 }
 
 // CancelAISessionRun 取消指定 run，只对当前 session 的 current run 生效。
