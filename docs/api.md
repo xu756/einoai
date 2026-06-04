@@ -1,16 +1,18 @@
-# einoai 接口文档
+# einoai API 文档
 
-本文档以当前 Gin 示例程序为准。核心包 `einoai` 不依赖 Gin，HTTP 路由只是在根目录示例程序中演示如何组合 `einoai/aisdk` 和 `einoai/openai` 协议包。
+本文档描述 `cmd/server` 示例 Gin 服务暴露的 HTTP API，以及 `einoai` 核心包和协议包的组合方式。核心包 `github.com/xu756/einoai` 本身不依赖 Gin，HTTP 路由只是示例服务如何组合 `aisdk` 与 `openai` 的参考。
 
 ## 基本信息
 
-默认服务地址：
+### 默认服务地址
 
 ```text
 http://127.0.0.1:8080
 ```
 
-健康检查：
+示例服务实际监听地址由 `HTTP_ADDR` 控制，默认值是 `:8080`。
+
+### 健康检查
 
 ```http
 GET /ping
@@ -24,25 +26,27 @@ GET /ping
 }
 ```
 
-当前约定：
+## 核心约定
 
-- 一个 `sessionId` 同一时间只对应一个当前 run。
-- 查询、订阅、取消都以 `sessionId` 为主，路径中的 `run_id` 只用于兼容前端路由形态，核心服务不会用它查找 run。
+- 一个 `sessionId` 同一时间只对应一个 current run。
+- 查询、订阅、取消都以 `sessionId` 为主。
 - 创建新 run 会覆盖该 session 的 current run 指针。
 - Redis 保存 run meta、status、events、current run、error、usage、metadata。
-- `agent` 不保存到 Redis，由业务方每次创建 run 时传入。
-- 请求只使用标准 message 数组，不支持旧的根级 `message` 字段。
-- 不会只取最后一条 user message，也不会生成默认兜底消息。
+- `adk.Agent` 不保存到 Redis，由业务方每次创建 run 时传入。
+- 请求只使用标准 `messages` 数组，不支持旧的根级 `message` 字段。
+- 不会只取最后一条 user message。
+- 不会生成默认兜底消息。
+- 示例路由里订阅路径保留了 `:run_id` 参数，但当前核心服务按 `sessionId` 查找 current run。
 
 ## Run 状态
 
 | 状态 | 说明 |
 | --- | --- |
-| `queued` | 已创建，等待后台执行 |
-| `running` | 正在执行 |
-| `completed` | 正常完成 |
-| `cancelled` | 已取消 |
-| `failed` | 执行失败 |
+| `queued` | run 已创建，等待后台执行 |
+| `running` | run 正在执行 |
+| `completed` | run 正常完成 |
+| `cancelled` | run 已取消 |
+| `failed` | run 执行失败 |
 
 Run 信息结构：
 
@@ -71,7 +75,7 @@ Run 信息结构：
 Last-Event-ID: <event_id>
 ```
 
-服务端会从 `AfterEventID` 之后继续推送 Redis 中尚未消费的事件。客户端断开后，可使用最后收到的 SSE `id` 继续订阅。
+客户端断开后，可以用最后收到的 SSE `id` 继续订阅。核心服务会从 `AfterEventID` 之后读取 Redis Stream 中尚未消费的事件。
 
 ## AI SDK / assistant-ui 协议
 
@@ -81,11 +85,25 @@ Last-Event-ID: <event_id>
 /api/usechat
 ```
 
+请求体类型由 `aisdk.CreateRunRequest` 定义：
+
+```go
+type CreateRunRequest struct {
+    Messages []Message      `json:"messages"`
+    Model    string         `json:"model,omitempty"`
+    Params   map[string]any `json:"params,omitempty"`
+}
+```
+
+`messages` 不能为空。`Message` 支持 `role`、`parts`、`content`、`metadata`、`data`；`parts` 支持 `text`、`image`、`file`，并可携带 `url`、`mediaType`、`filename`。
+
 ### 直接补全并返回流
 
 ```http
 POST /api/usechat/completions
 ```
+
+该接口创建一个固定 session ID 为 `usechat-completions` 的 run，并直接返回 AI SDK SSE 流。
 
 请求体：
 
@@ -104,12 +122,12 @@ POST /api/usechat/completions
     }
   ],
   "params": {
-    "traceId": "trace_001"
+    "source": "web"
   }
 }
 ```
 
-响应为 AI SDK UI Message Stream SSE。
+响应为 `text/event-stream`。
 
 ### 创建 run
 
@@ -176,7 +194,15 @@ GET /api/usechat/sessions/:sessionId
 }
 ```
 
-### 订阅 run 事件
+如果 current run 不存在，核心服务返回 `run: null`：
+
+```json
+{
+  "run": null
+}
+```
+
+### 订阅当前 run 事件
 
 ```http
 POST /api/usechat/sessions/:sessionId/runs/:run_id
@@ -186,6 +212,9 @@ POST /api/usechat/sessions/:sessionId/runs/:run_id
 
 ```text
 Content-Type: text/event-stream; charset=utf-8
+Cache-Control: no-cache, no-transform
+Connection: keep-alive
+X-Accel-Buffering: no
 x-vercel-ai-ui-message-stream: v1
 ```
 
@@ -223,10 +252,18 @@ id: 1748937600001-9
 data: {"type":"message-metadata","messageMetadata":{"modelId":"gpt-4o"}}
 
 id: 1748937600001-10
-data: {"type":"finish","finishReason":"stop","messageMetadata":{"custom":{"usage":{"inputTokens":100,"outputTokens":50,"totalTokens":150,"cachedInputTokens":0,"inputTokenDetails":{"cacheReadTokens":0,"noCacheTokens":100},"outputTokenDetails":{"textTokens":45,"reasoningTokens":5},"reasoningTokens":5}}}}
+data: {"type":"finish","finishReason":"stop","messageMetadata":{"custom":{"usage":{"inputTokens":2846,"inputTokenDetails":{"noCacheTokens":1182,"cacheReadTokens":1664},"outputTokens":642,"outputTokenDetails":{"textTokens":642,"reasoningTokens":0},"totalTokens":3488,"reasoningTokens":0,"cachedInputTokens":1664}}}}
 
 data: [DONE]
 ```
+
+说明：
+
+- `finish-step` 当前只输出 `type`，不携带 `finishReason`。
+- `message-metadata.messageMetadata.modelId` 来自 `MODEL_NAME` 环境变量。
+- usage 只在最终 `finish.messageMetadata.custom.usage` 中返回。
+- AI SDK finish reason 会把核心事件中的 `tool_calls`、`content_filter` 转成 `tool-calls`、`content-filter`。
+- 如果是工具调用中间步骤，会先输出 `finish-step`，然后输出新的 `start-step` 继续下一步。
 
 工具调用事件：
 
@@ -236,13 +273,6 @@ data: {"type":"tool-input-delta","toolCallId":"call_001","inputTextDelta":"{\"lo
 data: {"type":"tool-input-available","toolCallId":"call_001","toolName":"get_weather","input":{"location":"北京"}}
 data: {"type":"tool-output-available","toolCallId":"call_001","output":{"temperature":26}}
 ```
-
-说明：
-
-- usage 只在最终 `finish` 事件返回。
-- `message-metadata.messageMetadata.modelId` 来自 `MODEL_NAME` 环境变量。
-- 中间工具步骤会发送 `finish-step` 后再发送新的 `start-step`。
-- AI SDK finish reason 使用 `tool-calls`、`content-filter` 这种连字符格式。
 
 ### 取消当前 run
 
@@ -266,11 +296,33 @@ POST /api/usechat/sessions/:sessionId/cancel
 /api/v1
 ```
 
-另外保留一个本地调试兼容路径：
+请求体类型由 `openai.ChatCompletionsRequest` 定义，支持常见 OpenAI-compatible chat completions 字段：
 
-```http
-POST /api/chat/completions
+```go
+type ChatCompletionsRequest struct {
+    Model               string            `json:"model"`
+    Messages            []ChatMessage     `json:"messages"`
+    Stream              bool              `json:"stream,omitempty"`
+    StreamOptions       *StreamOptions    `json:"stream_options,omitempty"`
+    Temperature         *float64          `json:"temperature,omitempty"`
+    TopP                *float64          `json:"top_p,omitempty"`
+    MaxTokens           *int              `json:"max_tokens,omitempty"`
+    MaxCompletionTokens *int              `json:"max_completion_tokens,omitempty"`
+    N                   *int              `json:"n,omitempty"`
+    Stop                json.RawMessage   `json:"stop,omitempty"`
+    PresencePenalty     *float64          `json:"presence_penalty,omitempty"`
+    FrequencyPenalty    *float64          `json:"frequency_penalty,omitempty"`
+    LogitBias           map[string]int    `json:"logit_bias,omitempty"`
+    User                string            `json:"user,omitempty"`
+    ResponseFormat      json.RawMessage   `json:"response_format,omitempty"`
+    Tools               []Tool            `json:"tools,omitempty"`
+    ToolChoice          json.RawMessage   `json:"tool_choice,omitempty"`
+    ParallelToolCalls   *bool             `json:"parallel_tool_calls,omitempty"`
+    Metadata            map[string]string `json:"metadata,omitempty"`
+}
 ```
+
+`messages` 不能为空。
 
 ### Chat Completions
 
@@ -278,7 +330,7 @@ POST /api/chat/completions
 POST /api/v1/chat/completions
 ```
 
-请求体支持 OpenAI-compatible chat completions 常见字段：
+请求示例：
 
 ```json
 {
@@ -348,13 +400,14 @@ data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000
 
 说明：
 
-- OpenAI 流不输出非标准 `tool_result` 字段。
-- usage 只在最终非 `tool_calls` 的 `finish` chunk 返回。
+- OpenAI 流不会输出非标准 `tool_result` 字段。
+- usage 只在最终非 `tool_calls` 的 finish chunk 返回。
+- `stream_options.include_usage` 可以被请求绑定，但当前实现只要最终 `finish` 事件中有 usage 就会写出 `usage` 字段。
 - OpenAI finish reason 使用 `tool_calls`、`content_filter` 这种下划线格式。
 
 #### 非流式响应
 
-当 `stream` 为 `false` 或不传时，接口会聚合文本内容后返回：
+当 `stream` 为 `false` 或不传时，示例服务会聚合 `text_delta` 后返回：
 
 ```json
 {
@@ -381,7 +434,7 @@ data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000
 POST /api/v1/sessions/:sessionId
 ```
 
-请求体同 `/api/v1/chat/completions`，但只创建后台 run，不直接返回模型内容。
+请求体同 `/api/v1/chat/completions`，但该接口只创建后台 run，不直接返回模型内容。
 
 响应：
 
@@ -417,7 +470,7 @@ GET /api/v1/sessions/:sessionId
 }
 ```
 
-### 订阅 run 事件
+### 订阅当前 run 事件
 
 ```http
 POST /api/v1/sessions/:sessionId/runs/:run_id
@@ -453,15 +506,31 @@ POST /api/v1/sessions/:sessionId/cancel
 }
 ```
 
+### 本地调试兼容路径
+
+示例服务还注册了一个 OpenAI chat completions 兼容调试路径：
+
+```http
+POST /api/chat/completions
+```
+
+处理逻辑与 `/api/v1/chat/completions` 相同。
+
 ## 核心包接口
 
-业务方可以不使用示例 Gin handler，直接组合协议包函数。
+核心包导入路径：
+
+```go
+import "github.com/xu756/einoai"
+```
+
+创建 Service：
 
 ```go
 svc := einoai.NewService(model, redisClient)
 ```
 
-核心接口：
+真实核心接口：
 
 ```go
 type Service interface {
@@ -469,6 +538,22 @@ type Service interface {
     GetRun(ctx context.Context, sessionID string) (*RunInfo, error)
     CancelRun(ctx context.Context, sessionID string) error
     SubscribeEvents(ctx context.Context, req SubscribeRequest) (EventStream, error)
+}
+```
+
+请求结构：
+
+```go
+type CreateRunRequest struct {
+    SessionID string
+    Messages  []*schema.Message
+    Agent     adk.Agent
+    Metadata  map[string]any
+}
+
+type SubscribeRequest struct {
+    SessionID     string
+    AfterEventID string
 }
 ```
 
@@ -544,7 +629,6 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 
     stream, err := h.AIService.SubscribeEvents(c.Request.Context(), einoai.SubscribeRequest{
         SessionID: run.SessionID,
-        AfterEventID: openaiLastEventID(c),
     })
     if err != nil {
         openai.WriteError(c, err)
@@ -558,9 +642,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 
 ## 内部事件类型
 
-核心 `RunEvent` 是协议无关事件，AI SDK 和 OpenAI 包负责把它转换成各自协议。
+核心 `RunEvent` 是协议无关事件，协议包负责将它转换为 AI SDK 或 OpenAI 输出。
 
-| 类型 | 说明 |
+| 类型 | 用途 |
 | --- | --- |
 | `run_created` | run 已创建 |
 | `run_started` | run 开始执行 |
@@ -570,13 +654,61 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 | `reasoning_start` | reasoning 块开始 |
 | `reasoning_delta` | reasoning 增量 |
 | `reasoning_end` | reasoning 块结束 |
-| `tool_call` | 工具调用 |
-| `tool_result` | 工具结果 |
-| `error` | 错误 |
-| `finish` | 当前步骤或最终完成 |
+| `tool_call` | 工具调用参数 |
+| `tool_result` | 工具执行结果 |
+| `error` | run 或流式执行错误 |
+| `finish` | 当前步骤或最终完成，携带 finish reason 和 usage |
 
-Reasoning 处理规则：
+## Reasoning 处理规则
 
 - 如果 Eino 返回 `ReasoningContent`，转换为 reasoning 事件。
-- 如果模型把 `<think>...</think>` 混在 `Content` 中，输出转换层拆分为 reasoning 事件和 text 事件。
-- 流式分片里 `<think>` 标签被拆开时也会正确拼接和拆分。
+- 如果模型把 `<think>...</think>` 混在 `Content`，输出转换层拆成 reasoning 事件和 text 事件。
+- 流式分片里 `<think>` 标签被拆开时也会正确处理。
+
+## 错误响应
+
+不同协议包的错误格式不同。
+
+AI SDK 普通 JSON 错误：
+
+```json
+{
+  "error": "messages is required"
+}
+```
+
+AI SDK SSE 已开始写入后的错误：
+
+```text
+data: {"type":"error","errorText":"some error"}
+
+data: [DONE]
+```
+
+OpenAI 普通 JSON 错误：
+
+```json
+{
+  "error": {
+    "message": "messages is required",
+    "type": "invalid_request_error"
+  }
+}
+```
+
+OpenAI SSE 错误：
+
+```text
+data: {"error":{"message":"some error","type":"server_error"}}
+
+data: [DONE]
+```
+
+常见错误：
+
+| 场景 | 错误 |
+| --- | --- |
+| `messages` 为空 | `messages is required` |
+| `sessionID` 为空 | `sessionID is required` |
+| `agent` 为空 | `agent is required` |
+| 订阅不存在的 current run | `run for session <sessionId> not found` |
