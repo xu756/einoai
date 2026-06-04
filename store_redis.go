@@ -51,7 +51,7 @@ func (s *redisStore) initRun(ctx context.Context, run *RunInfo) error {
 	metaKey := runMetaKey(run.SessionID, run.RunID)
 	if err := s.rdb.HSet(ctx, metaKey, map[string]any{
 		"session_id": run.SessionID,
-		"runId":      run.RunID,
+		"run_id":     run.RunID,
 		"status":     string(run.Status),
 		"error":      run.Error,
 		"created_at": now.UnixMilli(),
@@ -144,7 +144,7 @@ func runInfoFromHash(values map[string]string) *RunInfo {
 
 	return &RunInfo{
 		SessionID: values["session_id"],
-		RunID:     values["runId"],
+		RunID:     values["run_id"],
 		Status:    RunStatus(values["status"]),
 		CreatedAt: time.UnixMilli(createdAt),
 		UpdatedAt: time.UnixMilli(updatedAt),

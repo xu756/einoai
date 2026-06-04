@@ -38,7 +38,7 @@ type SubscribeRequest struct {
 // RunInfo is stable metadata for a run.
 type RunInfo struct {
 	SessionID string         `json:"session_id"`
-	RunID     string         `json:"runId"`
+	RunID     string         `json:"run_id"`
 	Status    RunStatus      `json:"status"`
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`

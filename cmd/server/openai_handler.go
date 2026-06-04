@@ -13,7 +13,7 @@ func (a *app) registerOpenAI(r gin.IRouter) {
 	r.POST("/chat/completions", a.openAICompletions)
 	r.POST("/sessions/:sessionId", a.createOpenAIRun)
 	r.GET("/sessions/:sessionId", a.getOpenAIRun)
-	r.POST("/sessions/:sessionId/runs/:runId", a.subscribeOpenAIEvents)
+	r.POST("/sessions/:sessionId/runs/:run_id", a.subscribeOpenAIEvents)
 	r.POST("/sessions/:sessionId/cancel", a.cancelOpenAIRun)
 }
 
@@ -102,7 +102,7 @@ func (a *app) createOpenAIRun(c *gin.Context) {
 	}
 	c.JSON(http.StatusAccepted, gin.H{
 		"sessionId": run.SessionID,
-		"runId":     run.RunID,
+		"run_id":    run.RunID,
 		"status":    run.Status,
 	})
 }

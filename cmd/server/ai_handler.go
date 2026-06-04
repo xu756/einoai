@@ -11,7 +11,7 @@ func (a *app) registerAISDK(r gin.IRouter) {
 	r.POST("/completions", a.aiCompletions)
 	r.POST("/sessions/:sessionId", a.createAIRun)
 	r.GET("/sessions/:sessionId", a.getAIRun)
-	r.POST("/sessions/:sessionId/runs/:runId", a.subscribeAIEvents)
+	r.POST("/sessions/:sessionId/runs/:run_id", a.subscribeAIEvents)
 	r.POST("/sessions/:sessionId/cancel", a.cancelAIRun)
 }
 

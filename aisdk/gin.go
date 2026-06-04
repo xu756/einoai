@@ -27,7 +27,7 @@ func WriteError(c *gin.Context, err error) {
 func WriteCreateRunResponse(c *gin.Context, run *einoai.RunInfo) {
 	c.JSON(http.StatusAccepted, gin.H{
 		"sessionId": run.SessionID,
-		"runId":     run.RunID,
+		"run_id":    run.RunID,
 		"status":    run.Status,
 	})
 }

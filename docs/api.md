@@ -27,7 +27,7 @@ GET /ping
 当前约定：
 
 - 一个 `sessionId` 同一时间只对应一个当前 run。
-- 查询、订阅、取消都以 `sessionId` 为主，路径中的 `runId` 只用于兼容前端路由形态，核心服务不会用它查找 run。
+- 查询、订阅、取消都以 `sessionId` 为主，路径中的 `run_id` 只用于兼容前端路由形态，核心服务不会用它查找 run。
 - 创建新 run 会覆盖该 session 的 current run 指针。
 - Redis 保存 run meta、status、events、current run、error、usage、metadata。
 - `agent` 不保存到 Redis，由业务方每次创建 run 时传入。
@@ -49,7 +49,7 @@ Run 信息结构：
 ```json
 {
   "session_id": "session_001",
-  "runId": "run_xxx",
+  "run_id": "run_xxx",
   "status": "running",
   "created_at": "2026-06-04T15:30:00+08:00",
   "updated_at": "2026-06-04T15:30:01+08:00",
@@ -144,7 +144,7 @@ POST /api/usechat/sessions/:sessionId
 ```json
 {
   "sessionId": "session_001",
-  "runId": "run_xxx",
+  "run_id": "run_xxx",
   "status": "queued"
 }
 ```
@@ -161,7 +161,7 @@ GET /api/usechat/sessions/:sessionId
 {
   "run": {
     "session_id": "session_001",
-    "runId": "run_xxx",
+    "run_id": "run_xxx",
     "status": "running",
     "created_at": "2026-06-04T15:30:00+08:00",
     "updated_at": "2026-06-04T15:30:01+08:00",
@@ -179,7 +179,7 @@ GET /api/usechat/sessions/:sessionId
 ### 订阅 run 事件
 
 ```http
-POST /api/usechat/sessions/:sessionId/runs/:runId
+POST /api/usechat/sessions/:sessionId/runs/:run_id
 ```
 
 响应头：
@@ -388,7 +388,7 @@ POST /api/v1/sessions/:sessionId
 ```json
 {
   "sessionId": "session_001",
-  "runId": "run_xxx",
+  "run_id": "run_xxx",
   "status": "queued"
 }
 ```
@@ -405,7 +405,7 @@ GET /api/v1/sessions/:sessionId
 {
   "run": {
     "session_id": "session_001",
-    "runId": "run_xxx",
+    "run_id": "run_xxx",
     "status": "running",
     "created_at": "2026-06-04T15:30:00+08:00",
     "updated_at": "2026-06-04T15:30:01+08:00",
@@ -420,7 +420,7 @@ GET /api/v1/sessions/:sessionId
 ### 订阅 run 事件
 
 ```http
-POST /api/v1/sessions/:sessionId/runs/:runId
+POST /api/v1/sessions/:sessionId/runs/:run_id
 ```
 
 Query 参数：
