@@ -3,7 +3,7 @@ package aisdk
 import (
 	"net/http"
 
-	enioai "enio-ai/enioai"
+	"github.com/xu756/einoai"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
@@ -24,7 +24,7 @@ func WriteError(c *gin.Context, err error) {
 }
 
 // WriteCreateRunResponse writes a create-run response.
-func WriteCreateRunResponse(c *gin.Context, run *enioai.RunInfo) {
+func WriteCreateRunResponse(c *gin.Context, run *einoai.RunInfo) {
 	c.JSON(http.StatusAccepted, gin.H{
 		"sessionId": run.SessionID,
 		"runId":     run.RunID,
@@ -33,7 +33,7 @@ func WriteCreateRunResponse(c *gin.Context, run *enioai.RunInfo) {
 }
 
 // WriteRunResponse writes a run metadata response.
-func WriteRunResponse(c *gin.Context, run *enioai.RunInfo) {
+func WriteRunResponse(c *gin.Context, run *einoai.RunInfo) {
 	c.JSON(http.StatusOK, gin.H{"run": run})
 }
 
@@ -47,8 +47,8 @@ func WriteCancelResponse(c *gin.Context, err error) {
 }
 
 // HandleCreateRun is a composable convenience wrapper.
-func HandleCreateRun(c *gin.Context, svc enioai.Service, sessionID string, messages []*schema.Message, agent adk.Agent) {
-	run, err := svc.CreateRun(c.Request.Context(), enioai.CreateRunRequest{
+func HandleCreateRun(c *gin.Context, svc einoai.Service, sessionID string, messages []*schema.Message, agent adk.Agent) {
+	run, err := svc.CreateRun(c.Request.Context(), einoai.CreateRunRequest{
 		SessionID: sessionID,
 		Messages:  messages,
 		Agent:     agent,
@@ -61,7 +61,7 @@ func HandleCreateRun(c *gin.Context, svc enioai.Service, sessionID string, messa
 }
 
 // HandleGetRun is a composable convenience wrapper.
-func HandleGetRun(c *gin.Context, svc enioai.Service, sessionID string) {
+func HandleGetRun(c *gin.Context, svc einoai.Service, sessionID string) {
 	run, err := svc.GetRun(c.Request.Context(), sessionID)
 	if err != nil {
 		WriteError(c, err)
@@ -71,13 +71,13 @@ func HandleGetRun(c *gin.Context, svc enioai.Service, sessionID string) {
 }
 
 // HandleCancelRun is a composable convenience wrapper.
-func HandleCancelRun(c *gin.Context, svc enioai.Service, sessionID string) {
+func HandleCancelRun(c *gin.Context, svc einoai.Service, sessionID string) {
 	WriteCancelResponse(c, svc.CancelRun(c.Request.Context(), sessionID))
 }
 
 // HandleSubscribeEvents is a composable convenience wrapper.
-func HandleSubscribeEvents(c *gin.Context, svc enioai.Service, sessionID string, runID string) {
-	stream, err := svc.SubscribeEvents(c.Request.Context(), enioai.SubscribeRequest{
+func HandleSubscribeEvents(c *gin.Context, svc einoai.Service, sessionID string, runID string) {
+	stream, err := svc.SubscribeEvents(c.Request.Context(), einoai.SubscribeRequest{
 		SessionID:    sessionID,
 		AfterEventID: GetLastEventID(c),
 	})
@@ -90,7 +90,7 @@ func HandleSubscribeEvents(c *gin.Context, svc enioai.Service, sessionID string,
 }
 
 // HandleCompletions runs a direct completion using the same run/event pipeline.
-func HandleCompletions(c *gin.Context, svc enioai.Service, sessionID string, agent adk.Agent) {
+func HandleCompletions(c *gin.Context, svc einoai.Service, sessionID string, agent adk.Agent) {
 	req, err := BindCompletionsRequest(c)
 	if err != nil {
 		WriteError(c, err)
@@ -101,7 +101,7 @@ func HandleCompletions(c *gin.Context, svc enioai.Service, sessionID string, age
 		WriteError(c, err)
 		return
 	}
-	run, err := svc.CreateRun(c.Request.Context(), enioai.CreateRunRequest{
+	run, err := svc.CreateRun(c.Request.Context(), einoai.CreateRunRequest{
 		SessionID: sessionID,
 		Messages:  messages,
 		Agent:     agent,
@@ -110,7 +110,7 @@ func HandleCompletions(c *gin.Context, svc enioai.Service, sessionID string, age
 		WriteError(c, err)
 		return
 	}
-	stream, err := svc.SubscribeEvents(c.Request.Context(), enioai.SubscribeRequest{
+	stream, err := svc.SubscribeEvents(c.Request.Context(), einoai.SubscribeRequest{
 		SessionID: run.SessionID,
 	})
 	if err != nil {

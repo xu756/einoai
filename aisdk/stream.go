@@ -6,7 +6,7 @@ import (
 	"io"
 	"os"
 
-	enioai "enio-ai/enioai"
+	"github.com/xu756/einoai"
 
 	"github.com/gin-gonic/gin"
 )
@@ -24,8 +24,8 @@ type streamState struct {
 	toolCalls map[string]*toolState
 }
 
-// WriteEventStream writes enioai events as AI SDK Data Stream Protocol SSE.
-func WriteEventStream(c *gin.Context, stream enioai.EventStream) {
+// WriteEventStream writes einoai events as AI SDK Data Stream Protocol SSE.
+func WriteEventStream(c *gin.Context, stream einoai.EventStream) {
 	setStreamHeaders(c)
 	state := &streamState{toolCalls: make(map[string]*toolState)}
 	after := GetLastEventID(c)
@@ -55,37 +55,37 @@ func WriteEventStream(c *gin.Context, stream enioai.EventStream) {
 	}
 }
 
-func writeEvent(c *gin.Context, state *streamState, ev *enioai.RunEvent) bool {
+func writeEvent(c *gin.Context, state *streamState, ev *einoai.RunEvent) bool {
 	switch ev.Type {
-	case enioai.EventTextStart:
-		data, _ := enioai.DecodeEventData[enioai.TextData](ev)
+	case einoai.EventTextStart:
+		data, _ := einoai.DecodeEventData[einoai.TextData](ev)
 		writePart(c, ev.ID, map[string]any{"type": "text-start", "id": data.ID})
-	case enioai.EventTextDelta:
-		data, _ := enioai.DecodeEventData[enioai.TextData](ev)
+	case einoai.EventTextDelta:
+		data, _ := einoai.DecodeEventData[einoai.TextData](ev)
 		writePart(c, ev.ID, map[string]any{"type": "text-delta", "id": data.ID, "delta": data.Delta})
-	case enioai.EventTextEnd:
-		data, _ := enioai.DecodeEventData[enioai.TextData](ev)
+	case einoai.EventTextEnd:
+		data, _ := einoai.DecodeEventData[einoai.TextData](ev)
 		writePart(c, ev.ID, map[string]any{"type": "text-end", "id": data.ID})
-	case enioai.EventReasoningStart:
-		data, _ := enioai.DecodeEventData[enioai.ReasoningData](ev)
+	case einoai.EventReasoningStart:
+		data, _ := einoai.DecodeEventData[einoai.ReasoningData](ev)
 		writePart(c, ev.ID, map[string]any{"type": "reasoning-start", "id": data.ID})
-	case enioai.EventReasoningDelta:
-		data, _ := enioai.DecodeEventData[enioai.ReasoningData](ev)
+	case einoai.EventReasoningDelta:
+		data, _ := einoai.DecodeEventData[einoai.ReasoningData](ev)
 		writePart(c, ev.ID, map[string]any{"type": "reasoning-delta", "id": data.ID, "delta": data.Delta})
-	case enioai.EventReasoningEnd:
-		data, _ := enioai.DecodeEventData[enioai.ReasoningData](ev)
+	case einoai.EventReasoningEnd:
+		data, _ := einoai.DecodeEventData[einoai.ReasoningData](ev)
 		writePart(c, ev.ID, map[string]any{"type": "reasoning-end", "id": data.ID})
-	case enioai.EventToolCall:
-		data, _ := enioai.DecodeEventData[enioai.ToolCallData](ev)
+	case einoai.EventToolCall:
+		data, _ := einoai.DecodeEventData[einoai.ToolCallData](ev)
 		writeToolCall(c, state, ev.ID, data)
-	case enioai.EventToolResult:
-		data, _ := enioai.DecodeEventData[enioai.ToolResultData](ev)
+	case einoai.EventToolResult:
+		data, _ := einoai.DecodeEventData[einoai.ToolResultData](ev)
 		writeToolResult(c, state, ev.ID, data)
-	case enioai.EventError:
-		data, _ := enioai.DecodeEventData[enioai.ErrorData](ev)
+	case einoai.EventError:
+		data, _ := einoai.DecodeEventData[einoai.ErrorData](ev)
 		writePart(c, ev.ID, map[string]any{"type": "error", "errorText": data.Message})
-	case enioai.EventFinish:
-		data, _ := enioai.DecodeEventData[enioai.FinishData](ev)
+	case einoai.EventFinish:
+		data, _ := einoai.DecodeEventData[einoai.FinishData](ev)
 		if data.FinishReason == "tool_calls" {
 			writePendingToolsAvailable(c, state, ev.ID)
 			writePart(c, ev.ID, createFinishStepEvent())
@@ -100,7 +100,7 @@ func writeEvent(c *gin.Context, state *streamState, ev *enioai.RunEvent) bool {
 	return false
 }
 
-func writeToolCall(c *gin.Context, state *streamState, id string, data enioai.ToolCallData) {
+func writeToolCall(c *gin.Context, state *streamState, id string, data einoai.ToolCallData) {
 	callID := data.ID
 	if callID == "" {
 		callID = fmt.Sprintf("tool_call_%d", data.Index)
@@ -126,7 +126,7 @@ func writeToolCall(c *gin.Context, state *streamState, id string, data enioai.To
 	}
 }
 
-func writeToolResult(c *gin.Context, state *streamState, id string, data enioai.ToolResultData) {
+func writeToolResult(c *gin.Context, state *streamState, id string, data einoai.ToolResultData) {
 	st := state.toolCalls[data.ToolCallID]
 	if st == nil {
 		st = &toolState{id: data.ToolCallID, name: data.Name}
@@ -159,7 +159,7 @@ func writeToolAvailable(c *gin.Context, id string, st *toolState) {
 	st.available = true
 }
 
-func createFinishEvent(data enioai.FinishData) map[string]any {
+func createFinishEvent(data einoai.FinishData) map[string]any {
 	reason := normalizeFinishReason(data.FinishReason)
 	if reason == "" {
 		reason = "stop"
@@ -190,7 +190,7 @@ func createMessageMetadataEvent() map[string]any {
 	}
 }
 
-func createUsage(data enioai.FinishData) map[string]any {
+func createUsage(data einoai.FinishData) map[string]any {
 	return map[string]any{
 		"inputTokens":       data.Usage.PromptTokens,
 		"outputTokens":      data.Usage.CompletionTokens,

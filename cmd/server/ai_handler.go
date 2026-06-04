@@ -1,8 +1,8 @@
 package main
 
 import (
-	enioai "enio-ai/enioai"
-	"enio-ai/enioai/aisdk"
+	"github.com/xu756/einoai"
+	"github.com/xu756/einoai/aisdk"
 
 	"github.com/gin-gonic/gin"
 )
@@ -31,7 +31,7 @@ func (a *app) aiCompletions(c *gin.Context) {
 		aisdk.WriteError(c, err)
 		return
 	}
-	run, err := a.svc.CreateRun(c.Request.Context(), enioai.CreateRunRequest{
+	run, err := a.svc.CreateRun(c.Request.Context(), einoai.CreateRunRequest{
 		SessionID: "usechat-completions",
 		Messages:  messages,
 		Agent:     agent,
@@ -45,7 +45,7 @@ func (a *app) aiCompletions(c *gin.Context) {
 		aisdk.WriteError(c, err)
 		return
 	}
-	stream, err := a.svc.SubscribeEvents(c.Request.Context(), enioai.SubscribeRequest{
+	stream, err := a.svc.SubscribeEvents(c.Request.Context(), einoai.SubscribeRequest{
 		SessionID: run.SessionID,
 	})
 	if err != nil {
@@ -75,7 +75,7 @@ func (a *app) createAIRun(c *gin.Context) {
 		return
 	}
 
-	run, err := a.svc.CreateRun(c.Request.Context(), enioai.CreateRunRequest{
+	run, err := a.svc.CreateRun(c.Request.Context(), einoai.CreateRunRequest{
 		SessionID: sessionID,
 		Messages:  messages,
 		Agent:     agent,
@@ -106,7 +106,7 @@ func (a *app) getAIRun(c *gin.Context) {
 func (a *app) subscribeAIEvents(c *gin.Context) {
 	sessionID := c.Param("sessionId")
 
-	stream, err := a.svc.SubscribeEvents(c.Request.Context(), enioai.SubscribeRequest{
+	stream, err := a.svc.SubscribeEvents(c.Request.Context(), einoai.SubscribeRequest{
 		SessionID:    sessionID,
 		AfterEventID: aisdk.GetLastEventID(c),
 	})

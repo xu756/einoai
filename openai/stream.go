@@ -7,7 +7,7 @@ import (
 	"io"
 	"time"
 
-	enioai "enio-ai/enioai"
+	"github.com/xu756/einoai"
 
 	"github.com/cloudwego/eino/schema"
 	"github.com/gin-gonic/gin"
@@ -63,8 +63,8 @@ type completionTokensDetails struct {
 	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 }
 
-// WriteChatCompletionStream writes enioai events as OpenAI-compatible SSE chunks.
-func WriteChatCompletionStream(c *gin.Context, req ChatCompletionsRequest, stream enioai.EventStream) {
+// WriteChatCompletionStream writes einoai events as OpenAI-compatible SSE chunks.
+func WriteChatCompletionStream(c *gin.Context, req ChatCompletionsRequest, stream einoai.EventStream) {
 	setStreamHeaders(c)
 	id := "chatcmpl-" + fmt.Sprintf("%d", time.Now().UnixNano())
 	created := time.Now().Unix()
@@ -101,7 +101,7 @@ func WriteChatCompletionStream(c *gin.Context, req ChatCompletionsRequest, strea
 }
 
 // CollectChatCompletion aggregates a non-streaming response body.
-func CollectChatCompletion(ctx context.Context, req ChatCompletionsRequest, stream enioai.EventStream) (map[string]any, error) {
+func CollectChatCompletion(ctx context.Context, req ChatCompletionsRequest, stream einoai.EventStream) (map[string]any, error) {
 	var content string
 	var finishReason any = "stop"
 	for {
@@ -116,16 +116,16 @@ func CollectChatCompletion(ctx context.Context, req ChatCompletionsRequest, stre
 			continue
 		}
 		switch ev.Type {
-		case enioai.EventTextDelta:
-			data, _ := enioai.DecodeEventData[enioai.TextData](ev)
+		case einoai.EventTextDelta:
+			data, _ := einoai.DecodeEventData[einoai.TextData](ev)
 			content += data.Delta
-		case enioai.EventFinish:
-			data, _ := enioai.DecodeEventData[enioai.FinishData](ev)
+		case einoai.EventFinish:
+			data, _ := einoai.DecodeEventData[einoai.FinishData](ev)
 			if data.FinishReason != "" {
 				finishReason = data.FinishReason
 			}
-		case enioai.EventError:
-			data, _ := enioai.DecodeEventData[enioai.ErrorData](ev)
+		case einoai.EventError:
+			data, _ := einoai.DecodeEventData[einoai.ErrorData](ev)
 			return nil, fmt.Errorf("%s", data.Message)
 		}
 	}
@@ -145,20 +145,20 @@ func CollectChatCompletion(ctx context.Context, req ChatCompletionsRequest, stre
 	}, nil
 }
 
-func writeEvent(c *gin.Context, ev *enioai.RunEvent, id string, created int64, modelName string) bool {
+func writeEvent(c *gin.Context, ev *einoai.RunEvent, id string, created int64, modelName string) bool {
 	d := delta{}
 	var finishReason any
 	var u *usage
 
 	switch ev.Type {
-	case enioai.EventTextDelta:
-		data, _ := enioai.DecodeEventData[enioai.TextData](ev)
+	case einoai.EventTextDelta:
+		data, _ := einoai.DecodeEventData[einoai.TextData](ev)
 		d.Content = data.Delta
-	case enioai.EventReasoningDelta:
-		data, _ := enioai.DecodeEventData[enioai.ReasoningData](ev)
+	case einoai.EventReasoningDelta:
+		data, _ := einoai.DecodeEventData[einoai.ReasoningData](ev)
 		d.ReasoningContent = data.Delta
-	case enioai.EventToolCall:
-		data, _ := enioai.DecodeEventData[enioai.ToolCallData](ev)
+	case einoai.EventToolCall:
+		data, _ := einoai.DecodeEventData[einoai.ToolCallData](ev)
 		d.ToolCalls = []toolCallDelta{{
 			Index: data.Index,
 			ID:    data.ID,
@@ -168,18 +168,18 @@ func writeEvent(c *gin.Context, ev *enioai.RunEvent, id string, created int64, m
 				Arguments: data.Arguments,
 			},
 		}}
-	case enioai.EventToolResult:
+	case einoai.EventToolResult:
 		return false
-	case enioai.EventFinish:
-		data, _ := enioai.DecodeEventData[enioai.FinishData](ev)
+	case einoai.EventFinish:
+		data, _ := einoai.DecodeEventData[einoai.FinishData](ev)
 		if data.FinishReason != "" {
 			finishReason = normalizeFinishReason(data.FinishReason)
 		}
 		if finishReason != "tool_calls" {
 			u = convertUsage(data.Usage)
 		}
-	case enioai.EventError:
-		data, _ := enioai.DecodeEventData[enioai.ErrorData](ev)
+	case einoai.EventError:
+		data, _ := einoai.DecodeEventData[einoai.ErrorData](ev)
 		writeErrorData(c, data.Message)
 		return true
 	default:
@@ -194,7 +194,7 @@ func writeEvent(c *gin.Context, ev *enioai.RunEvent, id string, created int64, m
 		Choices: []choice{{Index: 0, Delta: d, FinishReason: finishReason}},
 		Usage:   u,
 	})
-	return ev.Type == enioai.EventFinish && finishReason != "tool_calls"
+	return ev.Type == einoai.EventFinish && finishReason != "tool_calls"
 }
 
 func normalizeFinishReason(reason string) string {

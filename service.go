@@ -1,4 +1,4 @@
-package enioai
+package einoai
 
 import (
 	"context"

@@ -3,7 +3,7 @@ package openai
 import (
 	"net/http"
 
-	enioai "enio-ai/enioai"
+	"github.com/xu756/einoai"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/gin-gonic/gin"
@@ -32,7 +32,7 @@ func WriteStreamError(c *gin.Context, err error) {
 }
 
 // HandleChatCompletions is a composable convenience wrapper.
-func HandleChatCompletions(c *gin.Context, svc enioai.Service, sessionID string, agent adk.Agent) {
+func HandleChatCompletions(c *gin.Context, svc einoai.Service, sessionID string, agent adk.Agent) {
 	req, err := BindChatCompletionsRequest(c)
 	if err != nil {
 		WriteError(c, err)
@@ -46,7 +46,7 @@ func HandleChatCompletions(c *gin.Context, svc enioai.Service, sessionID string,
 	if sessionID == "" {
 		sessionID = ResolveSessionID(c, req)
 	}
-	run, err := svc.CreateRun(c.Request.Context(), enioai.CreateRunRequest{
+	run, err := svc.CreateRun(c.Request.Context(), einoai.CreateRunRequest{
 		SessionID: sessionID,
 		Messages:  messages,
 		Agent:     agent,
@@ -55,7 +55,7 @@ func HandleChatCompletions(c *gin.Context, svc enioai.Service, sessionID string,
 		WriteError(c, err)
 		return
 	}
-	stream, err := svc.SubscribeEvents(c.Request.Context(), enioai.SubscribeRequest{
+	stream, err := svc.SubscribeEvents(c.Request.Context(), einoai.SubscribeRequest{
 		SessionID: run.SessionID,
 	})
 	if err != nil {

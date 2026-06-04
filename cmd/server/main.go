@@ -19,13 +19,12 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
 	"github.com/redis/go-redis/v9/maintnotifications"
-
-	enioai "enio-ai/enioai"
+	"github.com/xu756/einoai"
 )
 
 type app struct {
 	model model.ToolCallingChatModel
-	svc   enioai.Service
+	svc   einoai.Service
 }
 
 func main() {
@@ -62,7 +61,7 @@ func main() {
 
 	a := &app{
 		model: chatModel,
-		svc:   enioai.NewService(chatModel, rdb),
+		svc:   einoai.NewService(chatModel, rdb),
 	}
 
 	engine := gin.Default()

@@ -1,4 +1,4 @@
-package enioai
+package einoai
 
 import (
 	"context"
@@ -54,7 +54,7 @@ type Service interface {
 	SubscribeEvents(ctx context.Context, req SubscribeRequest) (EventStream, error)
 }
 
-// NewService creates the core enio-ai service.
+// NewService creates the core einoai service.
 func NewService(chatModel model.ToolCallingChatModel, db *redis.Client) Service {
 	return newService(chatModel, db)
 }

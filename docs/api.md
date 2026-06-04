@@ -1,6 +1,6 @@
-# enio-ai 接口文档
+# einoai 接口文档
 
-本文档以当前 Gin 示例程序为准。核心包 `enioai` 不依赖 Gin，HTTP 路由只是在根目录示例程序中演示如何组合 `enioai/aisdk` 和 `enioai/openai` 协议包。
+本文档以当前 Gin 示例程序为准。核心包 `einoai` 不依赖 Gin，HTTP 路由只是在根目录示例程序中演示如何组合 `einoai/aisdk` 和 `einoai/openai` 协议包。
 
 ## 基本信息
 
@@ -458,7 +458,7 @@ POST /api/v1/sessions/:sessionId/cancel
 业务方可以不使用示例 Gin handler，直接组合协议包函数。
 
 ```go
-svc := enioai.NewService(model, redisClient)
+svc := einoai.NewService(model, redisClient)
 ```
 
 核心接口：
@@ -496,7 +496,7 @@ func (h *Handler) CreateAIRun(c *gin.Context) {
         return
     }
 
-    run, err := h.AIService.CreateRun(c.Request.Context(), enioai.CreateRunRequest{
+    run, err := h.AIService.CreateRun(c.Request.Context(), einoai.CreateRunRequest{
         SessionID: sessionID,
         Messages:  messages,
         Agent:     agent,
@@ -532,7 +532,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
         return
     }
 
-    run, err := h.AIService.CreateRun(c.Request.Context(), enioai.CreateRunRequest{
+    run, err := h.AIService.CreateRun(c.Request.Context(), einoai.CreateRunRequest{
         SessionID: openai.ResolveSessionID(c, req),
         Messages:  messages,
         Agent:     agent,
@@ -542,7 +542,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
         return
     }
 
-    stream, err := h.AIService.SubscribeEvents(c.Request.Context(), enioai.SubscribeRequest{
+    stream, err := h.AIService.SubscribeEvents(c.Request.Context(), einoai.SubscribeRequest{
         SessionID: run.SessionID,
         AfterEventID: openaiLastEventID(c),
     })
