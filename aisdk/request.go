@@ -1,9 +1,9 @@
 package aisdk
 
 import (
+	"encoding/json"
 	"errors"
-
-	"github.com/gin-gonic/gin"
+	"io"
 )
 
 // CreateRunRequest is the AI SDK / assistant-ui request body.
@@ -31,10 +31,10 @@ type Part struct {
 	Filename  string `json:"filename,omitempty"`
 }
 
-// BindCreateRunRequest binds the request body without owning the route.
-func BindCreateRunRequest(c *gin.Context) (CreateRunRequest, error) {
+// DecodeCreateRunRequest decodes a create-run request body.
+func DecodeCreateRunRequest(body io.Reader) (CreateRunRequest, error) {
 	var req CreateRunRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
 		return req, err
 	}
 	if len(req.Messages) == 0 {
@@ -43,7 +43,7 @@ func BindCreateRunRequest(c *gin.Context) (CreateRunRequest, error) {
 	return req, nil
 }
 
-// BindCompletionsRequest is the same AI SDK request shape for direct completions.
-func BindCompletionsRequest(c *gin.Context) (CreateRunRequest, error) {
-	return BindCreateRunRequest(c)
+// DecodeCompletionsRequest is the same AI SDK request shape for direct completions.
+func DecodeCompletionsRequest(body io.Reader) (CreateRunRequest, error) {
+	return DecodeCreateRunRequest(body)
 }

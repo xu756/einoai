@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+
 	"github.com/xu756/einoai"
 	"github.com/xu756/einoai/aisdk"
 
@@ -16,19 +18,19 @@ func (a *app) registerAISDK(r gin.IRouter) {
 }
 
 func (a *app) aiCompletions(c *gin.Context) {
-	req, err := aisdk.BindCompletionsRequest(c)
+	req, err := aisdk.DecodeCompletionsRequest(c.Request.Body)
 	if err != nil {
-		aisdk.WriteError(c, err)
+		writeAIError(c, err)
 		return
 	}
 	messages, err := aisdk.ToSchemaMessages(req)
 	if err != nil {
-		aisdk.WriteError(c, err)
+		writeAIError(c, err)
 		return
 	}
 	agent, err := a.resolveAgent(c.Request.Context())
 	if err != nil {
-		aisdk.WriteError(c, err)
+		writeAIError(c, err)
 		return
 	}
 	run, err := a.svc.CreateRun(c.Request.Context(), einoai.CreateRunRequest{
@@ -42,7 +44,7 @@ func (a *app) aiCompletions(c *gin.Context) {
 		},
 	})
 	if err != nil {
-		aisdk.WriteError(c, err)
+		writeAIError(c, err)
 		return
 	}
 	stream, err := a.svc.SubscribeEvents(c.Request.Context(), einoai.SubscribeRequest{
@@ -50,7 +52,7 @@ func (a *app) aiCompletions(c *gin.Context) {
 		RunID:     run.RunID,
 	})
 	if err != nil {
-		aisdk.WriteError(c, err)
+		writeAIError(c, err)
 		return
 	}
 	defer stream.Close()
@@ -60,19 +62,19 @@ func (a *app) aiCompletions(c *gin.Context) {
 func (a *app) createAIRun(c *gin.Context) {
 	sessionID := c.Param("sessionId")
 
-	req, err := aisdk.BindCreateRunRequest(c)
+	req, err := aisdk.DecodeCreateRunRequest(c.Request.Body)
 	if err != nil {
-		aisdk.WriteError(c, err)
+		writeAIError(c, err)
 		return
 	}
 	messages, err := aisdk.ToSchemaMessages(req)
 	if err != nil {
-		aisdk.WriteError(c, err)
+		writeAIError(c, err)
 		return
 	}
 	agent, err := a.resolveAgent(c.Request.Context())
 	if err != nil {
-		aisdk.WriteError(c, err)
+		writeAIError(c, err)
 		return
 	}
 
@@ -87,10 +89,10 @@ func (a *app) createAIRun(c *gin.Context) {
 		},
 	})
 	if err != nil {
-		aisdk.WriteError(c, err)
+		writeAIError(c, err)
 		return
 	}
-	aisdk.WriteCreateRunResponse(c, run)
+	c.JSON(http.StatusAccepted, aisdk.NewCreateRunResponse(run))
 }
 
 func (a *app) getAIRun(c *gin.Context) {
@@ -98,10 +100,10 @@ func (a *app) getAIRun(c *gin.Context) {
 
 	run, err := a.svc.GetRun(c.Request.Context(), sessionID)
 	if err != nil {
-		aisdk.WriteError(c, err)
+		writeAIError(c, err)
 		return
 	}
-	aisdk.WriteRunResponse(c, run)
+	c.JSON(http.StatusOK, aisdk.NewRunResponse(run))
 }
 
 func (a *app) subscribeAIEvents(c *gin.Context) {
@@ -112,7 +114,7 @@ func (a *app) subscribeAIEvents(c *gin.Context) {
 		RunID:     c.Param("run_id"),
 	})
 	if err != nil {
-		aisdk.WriteError(c, err)
+		writeAIError(c, err)
 		return
 	}
 	defer stream.Close()
@@ -120,6 +122,9 @@ func (a *app) subscribeAIEvents(c *gin.Context) {
 }
 
 func (a *app) cancelAIRun(c *gin.Context) {
-	err := a.svc.CancelRun(c.Request.Context(), c.Param("sessionId"), c.Param("run_id"))
-	aisdk.WriteCancelResponse(c, err)
+	if err := a.svc.CancelRun(c.Request.Context(), c.Param("sessionId"), c.Param("run_id")); err != nil {
+		writeAIError(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, aisdk.NewCancelResponse())
 }

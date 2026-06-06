@@ -36,7 +36,7 @@ func WriteEventStream(c *gin.Context, stream einoai.EventStream) {
 			return
 		}
 		if err != nil {
-			WriteError(c, err)
+			writeStreamError(c, err)
 			return
 		}
 		if ev == nil {
@@ -152,6 +152,14 @@ func writeToolAvailable(c *gin.Context, id string, st *toolState) {
 		"input":      parseMaybeJSON(st.inputText),
 	})
 	st.available = true
+}
+
+func writeStreamError(c *gin.Context, err error) {
+	if err == nil {
+		return
+	}
+	writePart(c, "", map[string]any{"type": "error", "errorText": err.Error()})
+	writeDone(c)
 }
 
 func createFinishEvent(data einoai.FinishData) map[string]any {

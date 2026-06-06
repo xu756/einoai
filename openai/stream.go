@@ -85,7 +85,7 @@ func WriteChatCompletionStream(c *gin.Context, req ChatCompletionsRequest, strea
 			return
 		}
 		if err != nil {
-			WriteStreamError(c, err)
+			writeStreamError(c, err)
 			return
 		}
 		if ev == nil {
@@ -317,4 +317,12 @@ func writeErrorData(c *gin.Context, message string) {
 	errObj := map[string]any{"error": map[string]any{"message": message, "type": "server_error"}}
 	b, _ := json.Marshal(errObj)
 	_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", b)
+}
+
+func writeStreamError(c *gin.Context, err error) {
+	if err == nil {
+		return
+	}
+	writeErrorData(c, err.Error())
+	writeDone(c)
 }

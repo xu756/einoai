@@ -3,8 +3,7 @@ package openai
 import (
 	"encoding/json"
 	"errors"
-
-	"github.com/gin-gonic/gin"
+	"io"
 )
 
 // ChatCompletionsRequest is an OpenAI-compatible chat completions request.
@@ -64,10 +63,10 @@ type FunctionCall struct {
 	Arguments string `json:"arguments,omitempty"`
 }
 
-// BindChatCompletionsRequest binds an OpenAI chat completions body.
-func BindChatCompletionsRequest(c *gin.Context) (ChatCompletionsRequest, error) {
+// DecodeChatCompletionsRequest decodes an OpenAI chat completions body.
+func DecodeChatCompletionsRequest(body io.Reader) (ChatCompletionsRequest, error) {
 	var req ChatCompletionsRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
 		return req, err
 	}
 	if len(req.Messages) == 0 {
@@ -77,11 +76,11 @@ func BindChatCompletionsRequest(c *gin.Context) (ChatCompletionsRequest, error) 
 }
 
 // ResolveSessionID lets callers keep OpenAI stateless or attach their own ids.
-func ResolveSessionID(c *gin.Context, req ChatCompletionsRequest) string {
-	if v := c.GetHeader("X-Session-ID"); v != "" {
-		return v
-	}
-	if v := c.Query("sessionId"); v != "" {
+func ResolveSessionID(req ChatCompletionsRequest, candidates ...string) string {
+	for _, v := range candidates {
+		if v == "" {
+			continue
+		}
 		return v
 	}
 	if req.Model != "" {

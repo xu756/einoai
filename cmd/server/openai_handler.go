@@ -18,24 +18,24 @@ func (a *app) registerOpenAI(r gin.IRouter) {
 }
 
 func (a *app) openAICompletions(c *gin.Context) {
-	req, err := openai.BindChatCompletionsRequest(c)
+	req, err := openai.DecodeChatCompletionsRequest(c.Request.Body)
 	if err != nil {
-		openai.WriteError(c, err)
+		writeOpenAIError(c, err)
 		return
 	}
 	messages, err := openai.ToSchemaMessages(req)
 	if err != nil {
-		openai.WriteError(c, err)
+		writeOpenAIError(c, err)
 		return
 	}
 	agent, err := a.resolveAgent(c.Request.Context())
 	if err != nil {
-		openai.WriteError(c, err)
+		writeOpenAIError(c, err)
 		return
 	}
 
 	run, err := a.svc.CreateRun(c.Request.Context(), einoai.CreateRunRequest{
-		SessionID: openai.ResolveSessionID(c, req),
+		SessionID: openai.ResolveSessionID(req, c.GetHeader("X-Session-ID"), c.Query("sessionId")),
 		Messages:  messages,
 		Agent:     agent,
 		Metadata: map[string]any{
@@ -44,7 +44,7 @@ func (a *app) openAICompletions(c *gin.Context) {
 		},
 	})
 	if err != nil {
-		openai.WriteError(c, err)
+		writeOpenAIError(c, err)
 		return
 	}
 	stream, err := a.svc.SubscribeEvents(c.Request.Context(), einoai.SubscribeRequest{
@@ -52,7 +52,7 @@ func (a *app) openAICompletions(c *gin.Context) {
 		RunID:     run.RunID,
 	})
 	if err != nil {
-		openai.WriteError(c, err)
+		writeOpenAIError(c, err)
 		return
 	}
 	defer stream.Close()
@@ -63,7 +63,7 @@ func (a *app) openAICompletions(c *gin.Context) {
 	}
 	body, err := openai.CollectChatCompletion(c.Request.Context(), req, stream)
 	if err != nil {
-		openai.WriteError(c, err)
+		writeOpenAIError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, body)
@@ -72,19 +72,19 @@ func (a *app) openAICompletions(c *gin.Context) {
 func (a *app) createOpenAIRun(c *gin.Context) {
 	sessionID := c.Param("sessionId")
 
-	req, err := openai.BindChatCompletionsRequest(c)
+	req, err := openai.DecodeChatCompletionsRequest(c.Request.Body)
 	if err != nil {
-		openai.WriteError(c, err)
+		writeOpenAIError(c, err)
 		return
 	}
 	messages, err := openai.ToSchemaMessages(req)
 	if err != nil {
-		openai.WriteError(c, err)
+		writeOpenAIError(c, err)
 		return
 	}
 	agent, err := a.resolveAgent(c.Request.Context())
 	if err != nil {
-		openai.WriteError(c, err)
+		writeOpenAIError(c, err)
 		return
 	}
 
@@ -98,7 +98,7 @@ func (a *app) createOpenAIRun(c *gin.Context) {
 		},
 	})
 	if err != nil {
-		openai.WriteError(c, err)
+		writeOpenAIError(c, err)
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{
@@ -111,7 +111,7 @@ func (a *app) createOpenAIRun(c *gin.Context) {
 func (a *app) getOpenAIRun(c *gin.Context) {
 	run, err := a.svc.GetRun(c.Request.Context(), c.Param("sessionId"))
 	if err != nil {
-		openai.WriteError(c, err)
+		writeOpenAIError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"run": run})
@@ -125,7 +125,7 @@ func (a *app) subscribeOpenAIEvents(c *gin.Context) {
 		RunID:     c.Param("run_id"),
 	})
 	if err != nil {
-		openai.WriteError(c, err)
+		writeOpenAIError(c, err)
 		return
 	}
 	defer stream.Close()
@@ -139,7 +139,7 @@ func (a *app) subscribeOpenAIEvents(c *gin.Context) {
 
 func (a *app) cancelOpenAIRun(c *gin.Context) {
 	if err := a.svc.CancelRun(c.Request.Context(), c.Param("sessionId"), c.Param("run_id")); err != nil {
-		openai.WriteError(c, err)
+		writeOpenAIError(c, err)
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{"ok": true})
