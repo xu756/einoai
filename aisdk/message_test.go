@@ -46,6 +46,9 @@ func TestToSchemaMessagesConvertsAssistantToolUIParts(t *testing.T) {
 	if messages[0].Role != schema.User || messages[0].Content != "查询郑州天气" {
 		t.Fatalf("unexpected user message: %#v", messages[0])
 	}
+	if len(messages[0].UserInputMultiContent) != 0 {
+		t.Fatalf("text-only user message should not set multi content: %#v", messages[0].UserInputMultiContent)
+	}
 	if messages[1].Role != schema.Assistant || messages[1].Content != "我来查天气" || messages[1].ReasoningContent != "需要查询天气" {
 		t.Fatalf("unexpected first assistant message: %#v", messages[1])
 	}
@@ -60,6 +63,35 @@ func TestToSchemaMessagesConvertsAssistantToolUIParts(t *testing.T) {
 	}
 	if messages[3].Role != schema.Assistant || messages[3].Content != "郑州晴天" {
 		t.Fatalf("unexpected final assistant message: %#v", messages[3])
+	}
+}
+
+func TestToSchemaMessagesDoesNotSetContentWithMultiContent(t *testing.T) {
+	messages, err := ToSchemaMessages(CreateRunRequest{
+		Messages: []Message{{
+			Role: "user",
+			Parts: []Part{
+				{Type: "text", Text: "描述这个文件"},
+				{
+					Type:      "file",
+					URL:       "https://example.com/a.png",
+					MediaType: "image/png",
+					Filename:  "a.png",
+				},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("expected one message, got %#v", messages)
+	}
+	if messages[0].Content != "" {
+		t.Fatalf("multi-content user message should not set Content: %#v", messages[0])
+	}
+	if len(messages[0].UserInputMultiContent) != 2 {
+		t.Fatalf("expected text and file input parts, got %#v", messages[0].UserInputMultiContent)
 	}
 }
 

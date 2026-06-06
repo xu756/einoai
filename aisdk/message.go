@@ -41,11 +41,14 @@ func toSchemaMessages(m Message) ([]*schema.Message, error) {
 		attachUIExtra(msg, m)
 		return []*schema.Message{msg}, nil
 	default:
-		multiParts, _ := toInputParts(m.Parts)
 		msg := &schema.Message{
-			Role:                  schema.User,
-			Content:               textFromParts(m.Parts),
-			UserInputMultiContent: multiParts,
+			Role: schema.User,
+		}
+		multiParts, hasFilePart := toInputParts(m.Parts)
+		if hasFilePart {
+			msg.UserInputMultiContent = multiParts
+		} else {
+			msg.Content = textFromParts(m.Parts)
 		}
 		attachUIExtra(msg, m)
 		return []*schema.Message{msg}, nil
@@ -291,20 +294,20 @@ func mergeToolOutput(message *Message, msg *schema.Message) {
 
 func toInputParts(parts []Part) ([]schema.MessageInputPart, bool) {
 	var out []schema.MessageInputPart
-	hasTextPart := false
+	hasFilePart := false
 	for _, part := range parts {
 		switch part.Type {
 		case "text":
-			hasTextPart = true
 			out = append(out, schema.MessageInputPart{
 				Type: schema.ChatMessagePartTypeText,
 				Text: part.Text,
 			})
 		case "file":
+			hasFilePart = true
 			out = append(out, toFileInputPart(part))
 		}
 	}
-	return out, hasTextPart
+	return out, hasFilePart
 }
 
 func fromInputParts(parts []schema.MessageInputPart) []Part {
