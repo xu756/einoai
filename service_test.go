@@ -3,9 +3,24 @@ package einoai
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/cloudwego/eino/schema"
 )
+
+func TestNewServiceUsesDefaultRedisTTL(t *testing.T) {
+	svc := NewService(nil).(*service)
+	if svc.store.ttl != DefaultRedisTTL {
+		t.Fatalf("expected default redis ttl %s, got %s", DefaultRedisTTL, svc.store.ttl)
+	}
+}
+
+func TestNewServiceAcceptsRedisTTLOption(t *testing.T) {
+	svc := NewService(nil, WithRedisTTL(12*time.Hour)).(*service)
+	if svc.store.ttl != 12*time.Hour {
+		t.Fatalf("expected custom redis ttl, got %s", svc.store.ttl)
+	}
+}
 
 func TestServiceGetRunHidesTerminalCurrentRun(t *testing.T) {
 	store, cleanup := newTestRedisStore(t)

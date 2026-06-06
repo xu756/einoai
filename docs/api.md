@@ -65,17 +65,16 @@ Run 信息结构：
 }
 ```
 
-## 断点恢复
+## 事件订阅
 
-订阅 SSE 时支持以下任一方式指定游标：
+订阅 SSE 时需要指定 `runID`：
 
 ```text
-?after=<event_id>
-?lastEventId=<event_id>
-Last-Event-ID: <event_id>
+POST /api/usechat/sessions/:sessionId/runs/:run_id
+POST /api/v1/sessions/:sessionId/runs/:run_id
 ```
 
-客户端断开后，可以用最后收到的 SSE `id` 继续订阅。核心服务会从 `AfterEventID` 之后读取 Redis Stream 中尚未消费的事件。
+当前核心服务不读取 `Last-Event-ID`，重新连接时直接按 `sessionID + runID` 订阅该 run。
 
 ## AI SDK / assistant-ui 协议
 
@@ -527,7 +526,11 @@ import "github.com/xu756/einoai"
 创建 Service：
 
 ```go
-svc := einoai.NewService(model, redisClient)
+svc := einoai.NewService(redisClient)
+svcWithTTL := einoai.NewService(
+    redisClient,
+    einoai.WithRedisTTL(einoai.DefaultRedisTTL),
+)
 ```
 
 真实核心接口：
@@ -536,7 +539,8 @@ svc := einoai.NewService(model, redisClient)
 type Service interface {
     CreateRun(ctx context.Context, req CreateRunRequest) (*RunInfo, error)
     GetRun(ctx context.Context, sessionID string) (*RunInfo, error)
-    CancelRun(ctx context.Context, sessionID string) error
+    GetMessages(ctx context.Context, sessionID string) ([]*schema.Message, error)
+    CancelRun(ctx context.Context, sessionID string, runID string) error
     SubscribeEvents(ctx context.Context, req SubscribeRequest) (EventStream, error)
 }
 ```
@@ -552,8 +556,8 @@ type CreateRunRequest struct {
 }
 
 type SubscribeRequest struct {
-    SessionID     string
-    AfterEventID string
+    SessionID string
+    RunID     string
 }
 ```
 

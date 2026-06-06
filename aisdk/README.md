@@ -1,17 +1,16 @@
 # aisdk 包
 
-`github.com/xu756/einoai/aisdk` 是 enio-ai 的 AI SDK / assistant-ui 协议适配包。它负责把前端 AI SDK 请求转换成 Eino `[]*schema.Message`，并把核心 `einoai.RunEvent` 输出为 AI SDK UI Message Stream SSE。
+`github.com/xu756/einoai/aisdk` 是 AI SDK / assistant-ui 协议适配包。它负责把前端 UIMessage 请求转换成 Eino `[]*schema.Message`，并把核心 `einoai.RunEvent` 输出为 AI SDK UI Message Stream SSE。
 
-这个包可以依赖 Gin，但它不是路由注册器。业务方应该在自己的 Gin handler 中完成鉴权、限流、日志、agent 选择、参数校验、埋点等逻辑后，再组合调用本包函数。
+这个包不注册路由。普通请求解析和响应构造不依赖 Gin；只有 `WriteEventStream` 这个流式写出函数接收 `*gin.Context`。
 
 ## 职责
 
-- 绑定 AI SDK / assistant-ui 请求体。
-- 将 `messages` 转成 Eino `[]*schema.Message`。
-- 从 query/header 解析断点恢复游标。
+- 解码 AI SDK / assistant-ui 请求体。
+- 将 `messages: UIMessage[]` 转成 Eino `[]*schema.Message`。
+- 将 Redis 中保存的 `[]*schema.Message` 转回 `[]aisdk.Message`。
 - 将核心事件写成 AI SDK UI Message Stream。
-- 写出创建 run、查询 run、取消 run、错误等响应。
-- 提供可选的便捷 handler 函数。
+- 返回创建 run、查询 run、取消 run 的响应结构体。
 
 ## 请求结构
 
@@ -25,51 +24,97 @@ type CreateRunRequest struct {
 
 `messages` 不能为空，不支持旧的根级 `message` 字段。
 
+`Message` 对齐 AI SDK UIMessage：
+
 ```go
 type Message struct {
-    Role     string         `json:"role,omitempty"`
-    Parts    []Part         `json:"parts,omitempty"`
-    Content  string         `json:"content,omitempty"`
+    ID       string         `json:"id,omitempty"`
+    Role     string         `json:"role"`
     Metadata map[string]any `json:"metadata,omitempty"`
-    Data     map[string]any `json:"data,omitempty"`
-}
-
-type Part struct {
-    Type      string `json:"type,omitempty"`
-    Text      string `json:"text,omitempty"`
-    URL       string `json:"url,omitempty"`
-    MediaType string `json:"mediaType,omitempty"`
-    Filename  string `json:"filename,omitempty"`
+    Parts    []Part         `json:"parts"`
 }
 ```
 
-`parts` 支持文本、图片和文件输入。`image/file` 会根据 `mediaType` 转换为 Eino 的多模态 message part；`data:` URL 会拆出 base64 数据。
+`Part` 支持 UIMessage 常用字段：
+
+```go
+type Part struct {
+    ID               string         `json:"id,omitempty"`
+    Type             string         `json:"type"`
+    Text             string         `json:"text,omitempty"`
+    State            string         `json:"state,omitempty"`
+    Data             any            `json:"data,omitempty"`
+    ToolCallID       string         `json:"toolCallId,omitempty"`
+    Input            any            `json:"input,omitempty"`
+    Output           any            `json:"output,omitempty"`
+    ErrorText        string         `json:"errorText,omitempty"`
+    ProviderExecuted *bool          `json:"providerExecuted,omitempty"`
+    URL              string         `json:"url,omitempty"`
+    MediaType        string         `json:"mediaType,omitempty"`
+    Filename         string         `json:"filename,omitempty"`
+    SourceID         string         `json:"sourceId,omitempty"`
+    Title            string         `json:"title,omitempty"`
+    ProviderMetadata map[string]any `json:"providerMetadata,omitempty"`
+}
+```
+
+示例：
+
+```json
+{
+  "messages": [
+    {
+      "id": "user_1",
+      "role": "user",
+      "metadata": {"custom": {}},
+      "parts": [
+        {"type": "text", "text": "查询郑州天气"}
+      ]
+    }
+  ],
+  "model": "deepseek-v4-flash"
+}
+```
+
+## 消息转换规则
+
+请求进入核心层：
+
+```go
+messages, err := aisdk.ToSchemaMessages(req)
+```
+
+历史从核心层返回给前端：
+
+```go
+resp := aisdk.NewRunResponse(run, schemaMessages)
+// resp.Messages 是 []aisdk.Message
+```
+
+转换要点：
+
+- user/system 文本 part 转为 schema `Content`。
+- user file part 转为 schema `UserInputMultiContent`。
+- 纯文本 user 消息不会同时设置 `Content` 和 `UserInputMultiContent`，避免 OpenAI ChatModel 报 `can't use both Content and MultiContent`。
+- assistant `step-start` 会拆分成多个 schema assistant step。
+- assistant `reasoning` 转为 schema `ReasoningContent`。
+- assistant `tool-*` 转为 schema assistant `ToolCalls`。
+- `tool-*` 的 `output-available` / `output-error` 会额外生成 schema tool message。
+- schema `assistant -> tool -> assistant` 历史会合并回一个 assistant UIMessage，并用多个 `step-start` part 分段。
+- `id` 和 `metadata` 会保存在 schema message `Extra` 中，用于回放时还原。
 
 ## 常用函数
 
 | 函数 | 用途 |
 | --- | --- |
-| `BindCreateRunRequest(c)` | 绑定创建 run 请求 |
-| `BindCompletionsRequest(c)` | 绑定直接 completions 请求，结构同创建 run |
-| `ToSchemaMessages(req)` | 转换为 Eino `[]*schema.Message` |
-| `GetLastEventID(c)` | 从 `after`、`lastEventId` 或 `Last-Event-ID` 读取恢复游标 |
-| `WriteCreateRunResponse(c, run)` | 写创建 run 响应 |
-| `WriteRunResponse(c, run)` | 写查询 run 响应 |
-| `WriteCancelResponse(c, err)` | 写取消响应 |
-| `WriteEventStream(c, stream)` | 写 AI SDK SSE 流 |
-| `WriteError(c, err)` | 写 JSON 错误或 SSE 错误 |
-
-便捷函数：
-
-| 函数 | 用途 |
-| --- | --- |
-| `HandleCreateRun` | 已有 messages 和 agent 时创建 run |
-| `HandleGetRun` | 查询当前 run |
-| `HandleCancelRun` | 取消当前 run |
-| `HandleSubscribeEvents` | 订阅事件并写流 |
-| `HandleCompletions` | 绑定请求、创建 run、订阅并写流 |
-
-便捷函数只是可选入口，不会强制注册路由。
+| `DecodeCreateRunRequest(body)` | 解码创建 run 请求 |
+| `DecodeCompletionsRequest(body)` | 解码直接 completions 请求，结构同创建 run |
+| `ToSchemaMessages(req)` | 转换 AI SDK UIMessage 为 Eino `[]*schema.Message` |
+| `FromSchemaMessages(messages)` | 转换 Eino `[]*schema.Message` 为 `[]aisdk.Message` |
+| `NewCreateRunResponse(run)` | 构造创建 run JSON 响应结构体 |
+| `NewRunResponse(run, messages)` | 构造查询 run JSON 响应结构体，并转换 history |
+| `NewCancelResponse()` | 构造取消 run JSON 响应结构体 |
+| `WriteEventStream(c, stream)` | 写 AI SDK UI Message Stream SSE |
 
 ## 组合示例
 
@@ -79,21 +124,21 @@ type Part struct {
 func (h *Handler) CreateAIRun(c *gin.Context) {
     sessionID := c.Param("sessionId")
 
-    req, err := aisdk.BindCreateRunRequest(c)
+    req, err := aisdk.DecodeCreateRunRequest(c.Request.Body)
     if err != nil {
-        aisdk.WriteError(c, err)
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
         return
     }
 
     messages, err := aisdk.ToSchemaMessages(req)
     if err != nil {
-        aisdk.WriteError(c, err)
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
         return
     }
 
-    agent, err := h.ResolveAgent(c.Request.Context(), sessionID, messages)
+    agent, err := h.ResolveAgent(c.Request.Context())
     if err != nil {
-        aisdk.WriteError(c, err)
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
         return
     }
 
@@ -108,11 +153,32 @@ func (h *Handler) CreateAIRun(c *gin.Context) {
         },
     })
     if err != nil {
-        aisdk.WriteError(c, err)
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
         return
     }
 
-    aisdk.WriteCreateRunResponse(c, run)
+    c.JSON(http.StatusAccepted, aisdk.NewCreateRunResponse(run))
+}
+```
+
+查询 run 和历史消息：
+
+```go
+func (h *Handler) GetAIRun(c *gin.Context) {
+    sessionID := c.Param("sessionId")
+
+    run, err := h.AIService.GetRun(c.Request.Context(), sessionID)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        return
+    }
+    messages, err := h.AIService.GetMessages(c.Request.Context(), sessionID)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        return
+    }
+
+    c.JSON(http.StatusOK, aisdk.NewRunResponse(run, messages))
 }
 ```
 
@@ -121,16 +187,30 @@ func (h *Handler) CreateAIRun(c *gin.Context) {
 ```go
 func (h *Handler) RunAIEvents(c *gin.Context) {
     stream, err := h.AIService.SubscribeEvents(c.Request.Context(), einoai.SubscribeRequest{
-        SessionID:     c.Param("sessionId"),
-        AfterEventID: aisdk.GetLastEventID(c),
+        SessionID: c.Param("sessionId"),
+        RunID:     c.Param("run_id"),
     })
     if err != nil {
-        aisdk.WriteError(c, err)
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
         return
     }
     defer stream.Close()
 
     aisdk.WriteEventStream(c, stream)
+}
+```
+
+取消 run：
+
+```go
+func (h *Handler) CancelAIRun(c *gin.Context) {
+    err := h.AIService.CancelRun(c.Request.Context(), c.Param("sessionId"), c.Param("run_id"))
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        return
+    }
+
+    c.JSON(http.StatusAccepted, aisdk.NewCancelResponse())
 }
 ```
 
@@ -174,14 +254,15 @@ data: {"type":"tool-output-available","toolCallId":"call_001","output":{"tempera
 
 说明：
 
-- `message-metadata.messageMetadata.modelId` 来自环境变量 `MODEL_NAME`。
+- `toolName` 和 `toolCallId` 来自 Eino tool call，不生成 `toolName: "tool"` 之类的兜底值。
+- `finish-step` 当前只输出 `type`。
 - usage 只在最终 `finish.messageMetadata.custom.usage` 中返回。
-- `finish-step` 当前只输出 `type`，不携带 `finishReason`。
-- 核心 finish reason 中的 `tool_calls`、`content_filter` 会输出为 `tool-calls`、`content-filter`。
+- `tool_calls`、`content_filter` 会输出为 AI SDK 的 `tool-calls`、`content-filter`。
+- 当前订阅直接订阅指定 `runID`，不读取 `Last-Event-ID`。
 
 ## 错误格式
 
-普通 JSON 错误：
+普通 JSON 错误由业务 handler 决定。示例服务使用：
 
 ```json
 {
@@ -193,6 +274,5 @@ data: {"type":"tool-output-available","toolCallId":"call_001","output":{"tempera
 
 ```text
 data: {"type":"error","errorText":"some error"}
-
 data: [DONE]
 ```

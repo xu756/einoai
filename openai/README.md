@@ -1,17 +1,18 @@
 # openai 包
 
-`github.com/xu756/einoai/openai` 是 enio-ai 的 OpenAI-compatible 协议适配包。它负责绑定 chat completions 请求、转换 OpenAI messages，并把核心 `einoai.RunEvent` 输出为 OpenAI-compatible streaming chunk。
+`github.com/xu756/einoai/openai` 是 OpenAI-compatible 协议适配包。它负责解码 chat completions 请求、转换 OpenAI messages，并把核心 `einoai.RunEvent` 输出为 OpenAI-compatible streaming chunk。
 
-这个包可以依赖 Gin，但不强制注册 `/v1/chat/completions` 或任何固定路由。业务方可以在自己的 handler 中先完成鉴权、限流、用户态 agent 选择、计费、日志和参数校验，再组合调用本包函数。
+这个包不注册 `/v1/chat/completions` 或任何固定路由。普通请求解析和响应构造不依赖 Gin；只有 `WriteChatCompletionStream` 这个流式写出函数接收 `*gin.Context`。
 
 ## 职责
 
-- 绑定 OpenAI-compatible chat completions 请求。
+- 解码 OpenAI-compatible chat completions 请求。
 - 将 OpenAI `messages` 转成 Eino `[]*schema.Message`。
+- 将 Redis 中保存的 `[]*schema.Message` 转回 `[]openai.ChatMessage`。
 - 解析业务 session ID。
 - 输出 OpenAI-compatible SSE stream chunk。
 - 聚合非流式 chat completions 响应。
-- 输出 OpenAI 风格错误响应。
+- 返回创建 run、查询 run、取消 run 的响应结构体。
 
 ## 请求结构
 
@@ -55,52 +56,84 @@ type ChatMessage struct {
 
 `content` 支持字符串，也支持 OpenAI content parts 数组；当前转换会提取其中 `type: "text"` 的文本。
 
+## 消息转换规则
+
+请求进入核心层：
+
+```go
+messages, err := openai.ToSchemaMessages(req)
+```
+
+历史从核心层返回给调用方：
+
+```go
+resp := openai.NewRunResponse(run, schemaMessages)
+// resp.Messages 是 []openai.ChatMessage
+```
+
+转换要点：
+
+- `system`、`user`、`assistant`、`tool` role 会映射到 Eino schema role。
+- assistant `tool_calls` 会保留 `id`、`type`、`index`、`function.name`、`function.arguments`。
+- tool message 会保留 `tool_call_id`。
+- schema history 转回 OpenAI messages 时，assistant tool call、tool result、assistant final 会保持为标准 OpenAI chat message 序列。
+
 ## 常用函数
 
 | 函数 | 用途 |
 | --- | --- |
-| `BindChatCompletionsRequest(c)` | 绑定 OpenAI-compatible 请求体 |
-| `ToSchemaMessages(req)` | 转换为 Eino `[]*schema.Message` |
-| `ResolveSessionID(c, req)` | 解析 session ID |
+| `DecodeChatCompletionsRequest(body)` | 解码 OpenAI-compatible 请求体 |
+| `ResolveSessionID(req, candidates...)` | 从业务传入候选值中解析 session ID |
+| `ToSchemaMessages(req)` | 转换 OpenAI messages 为 Eino `[]*schema.Message` |
+| `FromSchemaMessages(messages)` | 转换 Eino `[]*schema.Message` 为 `[]openai.ChatMessage` |
+| `NewCreateRunResponse(run)` | 构造创建 run JSON 响应结构体 |
+| `NewRunResponse(run, messages)` | 构造查询 run JSON 响应结构体，并转换 history |
+| `NewCancelResponse()` | 构造取消 run JSON 响应结构体 |
 | `WriteChatCompletionStream(c, req, stream)` | 写 OpenAI-compatible SSE 流 |
 | `CollectChatCompletion(ctx, req, stream)` | 聚合非流式响应 body |
-| `WriteError(c, err)` | 写 OpenAI-compatible JSON 错误 |
-| `WriteStreamError(c, err)` | 写 OpenAI-compatible SSE 错误 |
-| `HandleChatCompletions(c, svc, sessionID, agent)` | 可选便捷函数 |
 
 ## Session ID 解析
 
-`ResolveSessionID` 按以下顺序返回：
+`ResolveSessionID(req, candidates...)` 按以下顺序返回：
 
-1. Header `X-Session-ID`
-2. Query `sessionId`
-3. `openai-<model>`
-4. `openai`
+1. 第一个非空 candidate，例如 Header `X-Session-ID` 或 Query `sessionId`
+2. `openai-<model>`
+3. `openai`
+
+示例：
+
+```go
+sessionID := openai.ResolveSessionID(
+    req,
+    c.GetHeader("X-Session-ID"),
+    c.Query("sessionId"),
+)
+```
 
 ## 组合示例
 
 ```go
 func (h *Handler) ChatCompletions(c *gin.Context) {
-    req, err := openai.BindChatCompletionsRequest(c)
+    req, err := openai.DecodeChatCompletionsRequest(c.Request.Body)
     if err != nil {
-        openai.WriteError(c, err)
+        c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": err.Error()}})
         return
     }
 
     messages, err := openai.ToSchemaMessages(req)
     if err != nil {
-        openai.WriteError(c, err)
+        c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": err.Error()}})
         return
     }
 
-    agent, err := h.ResolveOpenAIAgent(c.Request.Context(), req, messages)
+    agent, err := h.ResolveAgent(c.Request.Context())
     if err != nil {
-        openai.WriteError(c, err)
+        c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": err.Error()}})
         return
     }
 
     run, err := h.AIService.CreateRun(c.Request.Context(), einoai.CreateRunRequest{
-        SessionID: openai.ResolveSessionID(c, req),
+        SessionID: openai.ResolveSessionID(req, c.GetHeader("X-Session-ID"), c.Query("sessionId")),
         Messages:  messages,
         Agent:     agent,
         Metadata: map[string]any{
@@ -109,15 +142,16 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
         },
     })
     if err != nil {
-        openai.WriteError(c, err)
+        c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": err.Error()}})
         return
     }
 
     stream, err := h.AIService.SubscribeEvents(c.Request.Context(), einoai.SubscribeRequest{
         SessionID: run.SessionID,
+        RunID:     run.RunID,
     })
     if err != nil {
-        openai.WriteError(c, err)
+        c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": err.Error()}})
         return
     }
     defer stream.Close()
@@ -129,10 +163,45 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 
     body, err := openai.CollectChatCompletion(c.Request.Context(), req, stream)
     if err != nil {
-        openai.WriteError(c, err)
+        c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": err.Error()}})
         return
     }
     c.JSON(http.StatusOK, body)
+}
+```
+
+查询 run 和历史消息：
+
+```go
+func (h *Handler) GetOpenAIRun(c *gin.Context) {
+    sessionID := c.Param("sessionId")
+
+    run, err := h.AIService.GetRun(c.Request.Context(), sessionID)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": err.Error()}})
+        return
+    }
+    messages, err := h.AIService.GetMessages(c.Request.Context(), sessionID)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": err.Error()}})
+        return
+    }
+
+    c.JSON(http.StatusOK, openai.NewRunResponse(run, messages))
+}
+```
+
+取消 run：
+
+```go
+func (h *Handler) CancelOpenAIRun(c *gin.Context) {
+    err := h.AIService.CancelRun(c.Request.Context(), c.Param("sessionId"), c.Param("run_id"))
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": err.Error()}})
+        return
+    }
+
+    c.JSON(http.StatusAccepted, openai.NewCancelResponse())
 }
 ```
 
@@ -147,7 +216,7 @@ id: 1748937600001-0
 data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"你好"},"finish_reason":null}]}
 
 id: 1748937600001-1
-data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
 
 data: [DONE]
 ```
@@ -161,7 +230,9 @@ data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000
 Tool call 输出：
 
 ```text
-data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000,"model":"gpt-4o","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_001","type":"function","function":{"name":"get_weather","arguments":"{\"location\":\"北京\"}"}}]},"finish_reason":null}]}
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000,"model":"gpt-4o","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_001","type":"function","function":{"name":"get_weather"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000,"model":"gpt-4o","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"location\":\"北京\"}"}}]},"finish_reason":null}]}
 
 data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 ```
@@ -169,9 +240,9 @@ data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000
 说明：
 
 - OpenAI 流不会输出非标准 `tool_result` 字段。
-- usage 只在最终非 `tool_calls` 的 finish chunk 返回。
-- `stream_options.include_usage` 可以被绑定，但当前实现只要最终 `finish` 事件中有 usage 就会写出 `usage` 字段。
-- finish reason 使用 `tool_calls`、`content_filter` 这种下划线格式。
+- tool call 首个 delta 输出 `id`、`type`、`function.name`，后续 arguments delta 不重复这些字段。
+- `stream_options.include_usage=true` 时，最终非 `tool_calls` finish 后会追加一个空 `choices` 的 usage chunk。
+- finish reason 使用 OpenAI 的 `tool_calls`、`content_filter` 下划线格式。
 
 ## 非流式输出
 
@@ -198,7 +269,7 @@ data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000
 
 ## 错误格式
 
-普通 JSON 错误：
+普通 JSON 错误由业务 handler 决定。示例服务使用 OpenAI 风格：
 
 ```json
 {
@@ -213,6 +284,5 @@ SSE 错误：
 
 ```text
 data: {"error":{"message":"some error","type":"server_error"}}
-
 data: [DONE]
 ```

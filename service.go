@@ -21,9 +21,9 @@ type service struct {
 	runCancels map[string]context.CancelFunc
 }
 
-func newService(db *redis.Client) *service {
+func newService(db *redis.Client, opts serviceOptions) *service {
 	return &service{
-		store:      newRedisStore(db),
+		store:      newRedisStore(db, opts.redisTTL),
 		runCancels: make(map[string]context.CancelFunc),
 	}
 }

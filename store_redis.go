@@ -11,10 +11,9 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const runTTL = 2 * time.Hour
-
 type redisStore struct {
 	rdb *redis.Client
+	ttl time.Duration
 }
 
 type storedEvent struct {
@@ -23,8 +22,8 @@ type storedEvent struct {
 	CreatedAt int64           `json:"createdAt"`
 }
 
-func newRedisStore(rdb *redis.Client) *redisStore {
-	return &redisStore{rdb: rdb}
+func newRedisStore(rdb *redis.Client, ttl time.Duration) *redisStore {
+	return &redisStore{rdb: rdb, ttl: ttl}
 }
 
 func runEventsKey(sessionID, runID string) string {
@@ -69,12 +68,12 @@ func (s *redisStore) initRun(ctx context.Context, run *RunInfo) error {
 	}).Err(); err != nil {
 		return err
 	}
-	if err := s.rdb.Set(ctx, currentRunKey(run.SessionID), run.RunID, runTTL).Err(); err != nil {
+	if err := s.rdb.Set(ctx, currentRunKey(run.SessionID), run.RunID, s.setExpiration()).Err(); err != nil {
 		return err
 	}
 
-	_ = s.rdb.Expire(ctx, metaKey, runTTL).Err()
-	_ = s.rdb.Expire(ctx, runEventsKey(run.SessionID, run.RunID), runTTL).Err()
+	s.expire(ctx, metaKey)
+	s.expire(ctx, runEventsKey(run.SessionID, run.RunID))
 	return nil
 }
 
@@ -84,8 +83,8 @@ func (s *redisStore) setRunStatus(ctx context.Context, sessionID, runID string, 
 	if err := s.rdb.HSet(ctx, metaKey, "status", string(status), "updated_at", now, "error", errText).Err(); err != nil {
 		return err
 	}
-	_ = s.rdb.Expire(ctx, currentRunKey(sessionID), runTTL).Err()
-	_ = s.rdb.Expire(ctx, metaKey, runTTL).Err()
+	s.expire(ctx, currentRunKey(sessionID))
+	s.expire(ctx, metaKey)
 	return nil
 }
 
@@ -150,7 +149,7 @@ func (s *redisStore) setActiveMessages(ctx context.Context, sessionID, runID str
 		return fmt.Errorf("marshal active messages: %w", err)
 	}
 	key := activeMessagesKey(sessionID, runID)
-	if err := s.rdb.Set(ctx, key, string(data), runTTL).Err(); err != nil {
+	if err := s.rdb.Set(ctx, key, string(data), s.setExpiration()).Err(); err != nil {
 		return err
 	}
 	return nil
@@ -186,7 +185,9 @@ func (s *redisStore) replaceSessionMessages(ctx context.Context, sessionID strin
 	if len(values) > 0 {
 		pipe.RPush(ctx, key, values...)
 	}
-	pipe.Expire(ctx, key, runTTL)
+	if s.ttl > 0 {
+		pipe.Expire(ctx, key, s.ttl)
+	}
 	if _, err := pipe.Exec(ctx); err != nil {
 		return err
 	}
@@ -271,10 +272,24 @@ func (s *redisStore) appendEvent(ctx context.Context, ev RunEvent) (*RunEvent, e
 	}
 
 	ev.ID = id
-	_ = s.rdb.Expire(ctx, runEventsKey(ev.SessionID, ev.RunID), runTTL).Err()
-	_ = s.rdb.Expire(ctx, runMetaKey(ev.SessionID, ev.RunID), runTTL).Err()
-	_ = s.rdb.Expire(ctx, currentRunKey(ev.SessionID), runTTL).Err()
+	s.expire(ctx, runEventsKey(ev.SessionID, ev.RunID))
+	s.expire(ctx, runMetaKey(ev.SessionID, ev.RunID))
+	s.expire(ctx, currentRunKey(ev.SessionID))
 	return &ev, nil
+}
+
+func (s *redisStore) setExpiration() time.Duration {
+	if s.ttl <= 0 {
+		return 0
+	}
+	return s.ttl
+}
+
+func (s *redisStore) expire(ctx context.Context, key string) {
+	if s.ttl <= 0 {
+		return
+	}
+	_ = s.rdb.Expire(ctx, key, s.ttl).Err()
 }
 
 func (s *redisStore) readAfter(ctx context.Context, sessionID, runID, lastID string, block time.Duration, count int64) ([]*RunEvent, error) {

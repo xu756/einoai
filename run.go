@@ -9,6 +9,11 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+const (
+	// DefaultRedisTTL is the default expiration for Redis-backed run and message keys.
+	DefaultRedisTTL = 7 * 24 * time.Hour
+)
+
 // RunStatus is the lifecycle state for a persisted run.
 type RunStatus string
 
@@ -54,9 +59,37 @@ type Service interface {
 	SubscribeEvents(ctx context.Context, req SubscribeRequest) (EventStream, error)
 }
 
+type serviceOptions struct {
+	redisTTL time.Duration
+}
+
+// ServiceOption configures the core einoai service.
+type ServiceOption func(*serviceOptions)
+
+// WithRedisTTL configures expiration for Redis-backed run and message keys.
+//
+// A ttl <= 0 disables expiration for keys written by the service.
+func WithRedisTTL(ttl time.Duration) ServiceOption {
+	return func(opts *serviceOptions) {
+		opts.redisTTL = ttl
+	}
+}
+
+func defaultServiceOptions() serviceOptions {
+	return serviceOptions{
+		redisTTL: DefaultRedisTTL,
+	}
+}
+
 // NewService creates the core einoai service.
-func NewService(db *redis.Client) Service {
-	return newService(db)
+func NewService(db *redis.Client, opts ...ServiceOption) Service {
+	options := defaultServiceOptions()
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
+	}
+	return newService(db, options)
 }
 
 func isTerminalRunStatus(status RunStatus) bool {

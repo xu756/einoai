@@ -1,19 +1,20 @@
 # einoai
 
-`einoai` 是一个基于 CloudWeGo Eino ADK 封装的 Go 大模型运行包。它把模型执行、Redis 事件持久化、断点恢复、中断、reasoning / `<think>` 拆分抽成核心能力，并提供 AI SDK / assistant-ui 与 OpenAI-compatible 两套协议适配。
+`einoai` 是一个基于 CloudWeGo Eino ADK 封装的 Go 大模型运行包。核心包只负责 run 生命周期、Redis 持久化、事件订阅、中断、reasoning / `<think>` 拆分；协议层分别提供 AI SDK / assistant-ui 和 OpenAI-compatible 的消息转换与流式输出。
 
-核心包不依赖 Gin，也不强制注册路由。业务方可以在自己的 handler 中先做鉴权、限流、计费、日志、用户态 agent 选择、参数校验、业务埋点或多租户隔离，再组合调用本包提供的函数。
+核心包不依赖 Gin，也不强制注册路由。业务方可以在自己的 handler 中先做鉴权、限流、计费、日志、agent 选择、参数校验、业务埋点或多租户隔离，再组合调用本包。
 
 ## 特性
 
-- 基于 `model.ToolCallingChatModel` 与 Eino ADK `adk.Agent` 执行 run。
-- Redis 持久化 run metadata、status、events、current run、error、usage。
-- SSE 事件支持 `AfterEventID` 断点恢复。
-- 支持通过 `CancelRun` 中断后台 run。
-- 支持 AI SDK / assistant-ui UI Message Stream 输出。
+- 基于 Eino ADK `adk.Agent` 执行 run，agent 自己携带模型、工具和编排逻辑。
+- Redis 保存 run metadata、status、events、current run、active messages、committed messages、error、usage。
+- session 历史以 `[]*schema.Message` 存储，协议格式只在 HTTP 边界转换。
+- `GetMessages` 返回当前 session 的 schema 历史；有运行中 run 时返回 active snapshot，不包含正在流式生成的 assistant 内容。
+- `SubscribeEvents` 按 `sessionID + runID` 订阅当前 run，不使用 `Last-Event-ID` 断点恢复。
+- `CancelRun` 使用 `sessionID + runID` 精确中断 run。
+- 支持 AI SDK / assistant-ui UI Message Stream。
 - 支持 OpenAI-compatible chat completions 流式与非流式输出。
 - 支持 Eino `ReasoningContent` 与模型内容中的 `<think>...</think>` 拆分。
-- 协议包提供可拆分函数，方便接入业务自己的 Gin handler。
 
 ## 安装
 
@@ -33,7 +34,7 @@ module github.com/xu756/einoai
 .
 ├── aisdk/        # AI SDK / assistant-ui 协议适配
 ├── openai/       # OpenAI-compatible 协议适配
-├── cmd/server/   # 示例 Gin 服务，仅用于本地测试和参考
+├── cmd/server/   # 示例 Gin 服务
 ├── docs/         # HTTP API 文档
 ├── service.go    # 核心 Service 实现
 ├── run.go        # Run 类型、状态、核心接口
@@ -43,18 +44,14 @@ module github.com/xu756/einoai
 └── store_redis.go
 ```
 
-包职责：
-
 | 包 | 职责 |
 | --- | --- |
-| `github.com/xu756/einoai` | 核心 run 编排、Redis 持久化、订阅、中断、reasoning 拆分，不依赖 Gin |
-| `github.com/xu756/einoai/aisdk` | AI SDK / assistant-ui 请求绑定、消息转换、UI Message Stream 输出、Gin 辅助函数 |
-| `github.com/xu756/einoai/openai` | OpenAI-compatible chat completions 请求绑定、消息转换、stream chunk 输出、Gin 辅助函数 |
+| `github.com/xu756/einoai` | 核心 run 编排、Redis 持久化、订阅、中断、history 管理，不依赖 Gin |
+| `github.com/xu756/einoai/aisdk` | AI SDK UIMessage 请求转换、schema history 转 UIMessage、AI SDK SSE 流输出 |
+| `github.com/xu756/einoai/openai` | OpenAI chat completions 请求转换、schema history 转 OpenAI messages、OpenAI SSE / 非流式输出 |
 | `cmd/server` | 示例服务，不是核心包 |
 
-## 快速开始
-
-### 创建 Service
+## 创建 Service
 
 ```go
 import (
@@ -66,14 +63,21 @@ redisClient := redis.NewClient(&redis.Options{
     Addr: "127.0.0.1:6379",
 })
 
-svc := einoai.NewService(model, redisClient)
+svc := einoai.NewService(redisClient)
 ```
 
-`NewService` 参数：
+`NewService` 不接收 chat model。模型、工具和编排逻辑由每次 `CreateRun` 传入的 `adk.Agent` 提供。
+
+默认 Redis key TTL 是 7 天。可以通过 option 调整：
 
 ```go
-func NewService(chatModel model.ToolCallingChatModel, db *redis.Client) Service
+svc := einoai.NewService(
+    redisClient,
+    einoai.WithRedisTTL(7*24*time.Hour),
+)
 ```
+
+`WithRedisTTL(0)` 或负数表示不设置过期时间。
 
 核心接口：
 
@@ -81,37 +85,82 @@ func NewService(chatModel model.ToolCallingChatModel, db *redis.Client) Service
 type Service interface {
     CreateRun(ctx context.Context, req CreateRunRequest) (*RunInfo, error)
     GetRun(ctx context.Context, sessionID string) (*RunInfo, error)
-    CancelRun(ctx context.Context, sessionID string) error
+    GetMessages(ctx context.Context, sessionID string) ([]*schema.Message, error)
+    CancelRun(ctx context.Context, sessionID string, runID string) error
     SubscribeEvents(ctx context.Context, req SubscribeRequest) (EventStream, error)
+}
+
+type CreateRunRequest struct {
+    SessionID string
+    Messages  []*schema.Message
+    Agent     adk.Agent
+    Metadata  map[string]any
+}
+
+type SubscribeRequest struct {
+    SessionID string
+    RunID     string
 }
 ```
 
-### 在业务 Gin Handler 中使用 AI SDK 协议
+## History 规则
+
+Redis 内部只保存 `[]*schema.Message`：
+
+- 创建 run 时，业务传入的 `req.Messages` 是本次 session 的完整历史快照。
+- 前端如果从中间某条消息重新生成，后端以本次请求体为准，替换 active snapshot。
+- run 完成时，committed history = active snapshot + 本次 assistant / tool 输出。
+- run 取消或失败时，committed history = active snapshot，不保存未完成的 assistant 流式输出。
+- `GetMessages(ctx, sessionID)` 在 run 运行中返回 active snapshot；没有运行中 run 时返回 committed history。
+
+协议包只做边界转换：
 
 ```go
-import (
-    "github.com/xu756/einoai"
-    "github.com/xu756/einoai/aisdk"
-)
+uiMessages := aisdk.FromSchemaMessages(schemaMessages)
+openaiMessages := openai.FromSchemaMessages(schemaMessages)
+```
 
+## AI SDK / assistant-ui 接入
+
+AI SDK 请求体使用官方 UIMessage 结构：
+
+```json
+{
+  "messages": [
+    {
+      "id": "user_1",
+      "role": "user",
+      "metadata": {"custom": {}},
+      "parts": [
+        {"type": "text", "text": "查询郑州天气"}
+      ]
+    }
+  ],
+  "model": "deepseek-v4-flash"
+}
+```
+
+创建 run：
+
+```go
 func (h *Handler) CreateAIRun(c *gin.Context) {
     sessionID := c.Param("sessionId")
 
-    req, err := aisdk.BindCreateRunRequest(c)
+    req, err := aisdk.DecodeCreateRunRequest(c.Request.Body)
     if err != nil {
-        aisdk.WriteError(c, err)
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
         return
     }
 
     messages, err := aisdk.ToSchemaMessages(req)
     if err != nil {
-        aisdk.WriteError(c, err)
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
         return
     }
 
-    agent, err := h.ResolveAgent(c.Request.Context(), sessionID, messages)
+    agent, err := h.ResolveAgent(c.Request.Context())
     if err != nil {
-        aisdk.WriteError(c, err)
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
         return
     }
 
@@ -126,24 +175,45 @@ func (h *Handler) CreateAIRun(c *gin.Context) {
         },
     })
     if err != nil {
-        aisdk.WriteError(c, err)
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
         return
     }
 
-    aisdk.WriteCreateRunResponse(c, run)
+    c.JSON(http.StatusAccepted, aisdk.NewCreateRunResponse(run))
 }
 ```
 
-订阅事件：
+查询 run 和历史消息：
+
+```go
+func (h *Handler) GetAIRun(c *gin.Context) {
+    sessionID := c.Param("sessionId")
+
+    run, err := h.AIService.GetRun(c.Request.Context(), sessionID)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        return
+    }
+    messages, err := h.AIService.GetMessages(c.Request.Context(), sessionID)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        return
+    }
+
+    c.JSON(http.StatusOK, aisdk.NewRunResponse(run, messages))
+}
+```
+
+订阅 run 事件：
 
 ```go
 func (h *Handler) RunAIEvents(c *gin.Context) {
     stream, err := h.AIService.SubscribeEvents(c.Request.Context(), einoai.SubscribeRequest{
-        SessionID:    c.Param("sessionId"),
-        AfterEventID: aisdk.GetLastEventID(c),
+        SessionID: c.Param("sessionId"),
+        RunID:     c.Param("run_id"),
     })
     if err != nil {
-        aisdk.WriteError(c, err)
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
         return
     }
     defer stream.Close()
@@ -152,35 +222,32 @@ func (h *Handler) RunAIEvents(c *gin.Context) {
 }
 ```
 
-### 在业务 Gin Handler 中使用 OpenAI 协议
+## OpenAI-compatible 接入
+
+创建 run 或直接 chat completions 时，OpenAI 请求先转换成 schema messages：
 
 ```go
-import (
-    "github.com/xu756/einoai"
-    "github.com/xu756/einoai/openai"
-)
-
 func (h *Handler) ChatCompletions(c *gin.Context) {
-    req, err := openai.BindChatCompletionsRequest(c)
+    req, err := openai.DecodeChatCompletionsRequest(c.Request.Body)
     if err != nil {
-        openai.WriteError(c, err)
+        c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": err.Error()}})
         return
     }
 
     messages, err := openai.ToSchemaMessages(req)
     if err != nil {
-        openai.WriteError(c, err)
+        c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": err.Error()}})
         return
     }
 
-    agent, err := h.ResolveOpenAIAgent(c.Request.Context(), req, messages)
+    agent, err := h.ResolveAgent(c.Request.Context())
     if err != nil {
-        openai.WriteError(c, err)
+        c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": err.Error()}})
         return
     }
 
     run, err := h.AIService.CreateRun(c.Request.Context(), einoai.CreateRunRequest{
-        SessionID: openai.ResolveSessionID(c, req),
+        SessionID: openai.ResolveSessionID(req, c.GetHeader("X-Session-ID"), c.Query("sessionId")),
         Messages:  messages,
         Agent:     agent,
         Metadata: map[string]any{
@@ -189,15 +256,16 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
         },
     })
     if err != nil {
-        openai.WriteError(c, err)
+        c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": err.Error()}})
         return
     }
 
     stream, err := h.AIService.SubscribeEvents(c.Request.Context(), einoai.SubscribeRequest{
         SessionID: run.SessionID,
+        RunID:     run.RunID,
     })
     if err != nil {
-        openai.WriteError(c, err)
+        c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": err.Error()}})
         return
     }
     defer stream.Close()
@@ -209,70 +277,49 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 
     body, err := openai.CollectChatCompletion(c.Request.Context(), req, stream)
     if err != nil {
-        openai.WriteError(c, err)
+        c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": err.Error()}})
         return
     }
     c.JSON(http.StatusOK, body)
 }
 ```
 
-## 核心设计
-
-### 核心包 `einoai`
-
-核心包只处理协议无关的 run 生命周期：
-
-- 创建 run。
-- 查询 session 当前 run。
-- 取消 session 当前 run。
-- 订阅 run 事件。
-- Redis Stream 持久化事件并支持断点恢复。
-- 执行 Eino ADK agent。
-- 将模型输出转换为内部统一事件。
-
-`CreateRunRequest` 使用完整 `[]*schema.Message`，不会兼容旧的单 `message string` 字段，不会只取最后一条 user message，也不会生成默认兜底消息。
-
-### `aisdk` 协议包
-
-`aisdk` 负责：
-
-- 绑定 AI SDK / assistant-ui 请求体。
-- 将 AI SDK messages 转成 `[]*schema.Message`。
-- 将核心 `RunEvent` 写成 AI SDK UI Message Stream SSE。
-- 提供 `WriteError`、`WriteCreateRunResponse`、`WriteEventStream` 等可组合函数。
-- 提供 `HandleCreateRun`、`HandleCompletions` 等便捷函数，但它们不是唯一入口。
-
-### `openai` 协议包
-
-`openai` 负责：
-
-- 绑定 OpenAI-compatible chat completions 请求。
-- 将 OpenAI messages 转成 `[]*schema.Message`。
-- 输出 OpenAI-compatible streaming chunk。
-- 聚合非流式 chat completions 响应。
-- 提供 `ResolveSessionID`、`WriteError`、`WriteChatCompletionStream` 等可组合函数。
-
-### 为什么不强制 `RegisterRoutes`
-
-不推荐把路由注册和 handler 完全封死，例如：
+查询 OpenAI 格式历史：
 
 ```go
-handler.RegisterAISDKRoutes(router.Group("/usechat"))
-handler.RegisterOpenAIRoutes(router.Group("/v1"))
+func (h *Handler) GetOpenAIRun(c *gin.Context) {
+    sessionID := c.Param("sessionId")
+
+    run, err := h.AIService.GetRun(c.Request.Context(), sessionID)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": err.Error()}})
+        return
+    }
+    messages, err := h.AIService.GetMessages(c.Request.Context(), sessionID)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": err.Error()}})
+        return
+    }
+
+    c.JSON(http.StatusOK, openai.NewRunResponse(run, messages))
+}
 ```
 
-实际业务通常需要在 handler 中插入：
+## 协议层边界
 
-- 鉴权
-- 限流
-- 计费
-- 日志
-- 用户态 agent 选择
-- 参数校验
-- 业务埋点
-- 多租户隔离
+普通 JSON 响应函数返回结构体，不依赖 Gin：
 
-因此本包更推荐业务方自行注册路由，并在 handler 中组合协议包函数与核心 Service。
+- `aisdk.NewCreateRunResponse`
+- `aisdk.NewRunResponse`
+- `aisdk.NewCancelResponse`
+- `openai.NewCreateRunResponse`
+- `openai.NewRunResponse`
+- `openai.NewCancelResponse`
+
+只有流式写出函数接收 `*gin.Context`：
+
+- `aisdk.WriteEventStream`
+- `openai.WriteChatCompletionStream`
 
 ## 运行示例服务
 
@@ -303,19 +350,22 @@ air
 | `REDIS_ADDR` | Redis 地址 | `127.0.0.1:6379` |
 | `REDIS_PASSWORD` | Redis 密码 | 空 |
 | `REDIS_DB` | Redis DB | `1` |
+| `REDIS_TTL` | Redis key 过期时间，Go duration 格式；`0` 表示不过期 | `168h` |
 
-本地示例服务可以通过 `.env` 配置模型和 Redis，但生产环境建议使用系统环境变量或配置中心。不要把 `.env` 作为必须提交的配置文件。
+生产环境建议使用系统环境变量或配置中心，不要依赖本地 `.env`。
 
 ## Redis 存储说明
 
-Redis 用于保存：
+Redis 保存：
 
 - run meta：`session_id`、`run_id`、`status`、`error`、`created_at`、`updated_at`、`metadata`。
 - current run 指针。
+- active messages：运行中的请求快照。
+- committed session messages：已完成或已取消后的 session 历史。
 - Redis Stream 事件。
-- usage 通过最终 `finish` 事件持久化。
+- usage，通过最终 `finish` 事件持久化。
 
-当前代码中的 Redis key TTL 为 2 小时。
+默认 Redis key TTL 为 7 天，也就是 `einoai.DefaultRedisTTL`。示例服务可通过 `REDIS_TTL` 覆盖，代码接入可通过 `einoai.WithRedisTTL(ttl)` 覆盖；传入 `0` 或负数表示不设置过期时间。
 
 ## Reasoning / `<think>` 处理
 
@@ -325,17 +375,18 @@ Redis 用于保存：
 - 如果模型把 `<think>...</think>` 混在 `Content`，输出转换层会拆成 reasoning 事件和 text 事件。
 - 流式分片中 `<think>` 标签被拆开时，也会通过拆分器正确处理。
 
-## 中断与恢复
+## 中断与订阅
 
-- `CancelRun(ctx, sessionID)` 会取消该 session 当前 run。
-- 取消后会写入 `finish` 事件，finish reason 为 `cancelled`，状态更新为 `cancelled`。
-- 订阅时可以通过 `AfterEventID` 恢复未消费事件。
-- HTTP SSE 层支持 `?after=`、`?lastEventId=` 和 `Last-Event-ID`。
+- `CancelRun(ctx, sessionID, runID)` 会取消指定 run。
+- 取消后写入 `finish` 事件，finish reason 为 `cancelled`，状态更新为 `cancelled`。
+- `SubscribeEvents(ctx, SubscribeRequest{SessionID, RunID})` 订阅指定 run。
+- 当前订阅不读取 `Last-Event-ID`，重新连接时直接按 run 订阅。
 
 ## 测试
 
 ```bash
 go test ./...
+go vet ./...
+golangci-lint run
+go test -race ./...
 ```
-
-当前测试覆盖了 Redis 存储读取与 `<think>` reasoning 拆分等核心行为。

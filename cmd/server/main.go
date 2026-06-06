@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	ccb "github.com/cloudwego/eino-ext/callbacks/cozeloop"
 	openaimodel "github.com/cloudwego/eino-ext/components/model/openai"
@@ -61,7 +62,10 @@ func main() {
 
 	a := &app{
 		model: chatModel,
-		svc:   einoai.NewService(rdb),
+		svc: einoai.NewService(
+			rdb,
+			einoai.WithRedisTTL(envDuration("REDIS_TTL", einoai.DefaultRedisTTL)),
+		),
 	}
 
 	engine := gin.Default()
@@ -115,6 +119,16 @@ func envInt(key string, fallback int) int {
 		n, err := strconv.Atoi(v)
 		if err == nil {
 			return n
+		}
+	}
+	return fallback
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		d, err := time.ParseDuration(v)
+		if err == nil {
+			return d
 		}
 	}
 	return fallback
