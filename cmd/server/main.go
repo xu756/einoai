@@ -12,14 +12,13 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/compose"
 	"github.com/coze-dev/cozeloop-go"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
 	"github.com/redis/go-redis/v9/maintnotifications"
 	"github.com/xu756/einoai"
+	"github.com/xu756/einoai/agents/deepagent"
 )
 
 type app struct {
@@ -84,23 +83,25 @@ func main() {
 }
 
 func (a *app) resolveAgent(ctx context.Context) (adk.Agent, error) {
-	weatherTool, err := NewWeatherTool(ctx)
-	if err != nil {
-		return nil, err
-	}
-	calculatorTool, err := NewCalculatorTool(ctx)
-	if err != nil {
-		return nil, err
-	}
+	// weatherTool, err := NewWeatherTool(ctx)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// calculatorTool, err := NewCalculatorTool(ctx)
+	// if err != nil {
+	// 	return nil, err
+	// }
 
-	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-		Model: a.model,
-		ToolsConfig: adk.ToolsConfig{
-			ToolsNodeConfig: compose.ToolsNodeConfig{
-				Tools: []tool.BaseTool{weatherTool, calculatorTool},
-			},
-		},
-	})
+	// return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+	// 	Model: a.model,
+	// 	ToolsConfig: adk.ToolsConfig{
+	// 		ToolsNodeConfig: compose.ToolsNodeConfig{
+	// 			Tools: []tool.BaseTool{weatherTool, calculatorTool},
+	// 		},
+	// 	},
+	// })
+
+	return deepagent.GetDeepAgent(ctx, a.model)
 }
 
 func envOr(key string, fallback string) string {
