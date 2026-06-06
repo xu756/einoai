@@ -11,21 +11,18 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/redis/go-redis/v9"
 )
 
 type service struct {
-	model      model.ToolCallingChatModel
 	store      *redisStore
 	runMu      sync.Mutex
 	runCancels map[string]context.CancelFunc
 }
 
-func newService(chatModel model.ToolCallingChatModel, db *redis.Client) *service {
+func newService(db *redis.Client) *service {
 	return &service{
-		model:      chatModel,
 		store:      newRedisStore(db),
 		runCancels: make(map[string]context.CancelFunc),
 	}
@@ -63,11 +60,28 @@ func (s *service) CreateRun(ctx context.Context, req CreateRunRequest) (*RunInfo
 }
 
 func (s *service) GetRun(ctx context.Context, sessionID string) (*RunInfo, error) {
-	return s.store.getCurrentRun(ctx, sessionID)
+	run, err := s.store.getCurrentRun(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if run == nil {
+		return nil, nil
+	}
+	if isTerminalRunStatus(run.Status) {
+		_ = s.store.clearCurrentRunIfMatches(ctx, sessionID, run.RunID)
+		return nil, nil
+	}
+	return run, nil
 }
 
-func (s *service) CancelRun(ctx context.Context, sessionID string) error {
-	run, err := s.store.getCurrentRun(ctx, sessionID)
+func (s *service) CancelRun(ctx context.Context, sessionID string, runID string) error {
+	if sessionID == "" {
+		return errors.New("sessionID is required")
+	}
+	if runID == "" {
+		return errors.New("runID is required")
+	}
+	run, err := s.store.getRun(ctx, sessionID, runID)
 	if err != nil {
 		return err
 	}
@@ -77,7 +91,6 @@ func (s *service) CancelRun(ctx context.Context, sessionID string) error {
 	if isTerminalRunStatus(run.Status) {
 		return nil
 	}
-	runID := run.RunID
 	if s.cancelActiveRun(runID) {
 		return nil
 	}
@@ -91,22 +104,21 @@ func (s *service) SubscribeEvents(ctx context.Context, req SubscribeRequest) (Ev
 	if req.SessionID == "" {
 		return nil, errors.New("sessionID is required")
 	}
-	run, err := s.store.getCurrentRun(ctx, req.SessionID)
+	if req.RunID == "" {
+		return nil, errors.New("runID is required")
+	}
+	run, err := s.store.getRun(ctx, req.SessionID, req.RunID)
 	if err != nil {
 		return nil, err
 	}
 	if run == nil {
-		return nil, fmt.Errorf("run for session %s not found", req.SessionID)
-	}
-	lastID := req.AfterEventID
-	if lastID == "" {
-		lastID = "0-0"
+		return nil, fmt.Errorf("run %s for session %s not found", req.RunID, req.SessionID)
 	}
 	return &redisEventStream{
 		store:     s.store,
 		sessionID: req.SessionID,
-		runID:     run.RunID,
-		lastID:    lastID,
+		runID:     req.RunID,
+		lastID:    "0-0",
 	}, nil
 }
 

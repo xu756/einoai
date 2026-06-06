@@ -57,6 +57,7 @@ func HandleChatCompletions(c *gin.Context, svc einoai.Service, sessionID string,
 	}
 	stream, err := svc.SubscribeEvents(c.Request.Context(), einoai.SubscribeRequest{
 		SessionID: run.SessionID,
+		RunID:     run.RunID,
 	})
 	if err != nil {
 		WriteError(c, err)

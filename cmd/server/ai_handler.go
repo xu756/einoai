@@ -12,7 +12,7 @@ func (a *app) registerAISDK(r gin.IRouter) {
 	r.POST("/sessions/:sessionId", a.createAIRun)
 	r.GET("/sessions/:sessionId", a.getAIRun)
 	r.POST("/sessions/:sessionId/runs/:run_id", a.subscribeAIEvents)
-	r.POST("/sessions/:sessionId/cancel", a.cancelAIRun)
+	r.POST("/sessions/:sessionId/runs/:run_id/cancel", a.cancelAIRun)
 }
 
 func (a *app) aiCompletions(c *gin.Context) {
@@ -47,6 +47,7 @@ func (a *app) aiCompletions(c *gin.Context) {
 	}
 	stream, err := a.svc.SubscribeEvents(c.Request.Context(), einoai.SubscribeRequest{
 		SessionID: run.SessionID,
+		RunID:     run.RunID,
 	})
 	if err != nil {
 		aisdk.WriteError(c, err)
@@ -107,8 +108,8 @@ func (a *app) subscribeAIEvents(c *gin.Context) {
 	sessionID := c.Param("sessionId")
 
 	stream, err := a.svc.SubscribeEvents(c.Request.Context(), einoai.SubscribeRequest{
-		SessionID:    sessionID,
-		AfterEventID: aisdk.GetLastEventID(c),
+		SessionID: sessionID,
+		RunID:     c.Param("run_id"),
 	})
 	if err != nil {
 		aisdk.WriteError(c, err)
@@ -119,6 +120,6 @@ func (a *app) subscribeAIEvents(c *gin.Context) {
 }
 
 func (a *app) cancelAIRun(c *gin.Context) {
-	err := a.svc.CancelRun(c.Request.Context(), c.Param("sessionId"))
+	err := a.svc.CancelRun(c.Request.Context(), c.Param("sessionId"), c.Param("run_id"))
 	aisdk.WriteCancelResponse(c, err)
 }

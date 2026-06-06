@@ -47,17 +47,3 @@ func BindCreateRunRequest(c *gin.Context) (CreateRunRequest, error) {
 func BindCompletionsRequest(c *gin.Context) (CreateRunRequest, error) {
 	return BindCreateRunRequest(c)
 }
-
-// GetLastEventID resolves the resume cursor from query params or SSE headers.
-func GetLastEventID(c *gin.Context) string {
-	if v := c.Query("after"); v != "" {
-		return v
-	}
-	if v := c.Query("lastEventId"); v != "" {
-		return v
-	}
-	if v := c.GetHeader("Last-Event-ID"); v != "" {
-		return v
-	}
-	return ""
-}

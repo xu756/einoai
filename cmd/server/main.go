@@ -61,7 +61,7 @@ func main() {
 
 	a := &app{
 		model: chatModel,
-		svc:   einoai.NewService(chatModel, rdb),
+		svc:   einoai.NewService(rdb),
 	}
 
 	engine := gin.Default()

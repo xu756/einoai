@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/redis/go-redis/v9"
 )
@@ -31,8 +30,8 @@ type CreateRunRequest struct {
 
 // SubscribeRequest opens a persisted event stream for a run.
 type SubscribeRequest struct {
-	SessionID    string
-	AfterEventID string
+	SessionID string
+	RunID     string
 }
 
 // RunInfo is stable metadata for a run.
@@ -50,13 +49,13 @@ type RunInfo struct {
 type Service interface {
 	CreateRun(ctx context.Context, req CreateRunRequest) (*RunInfo, error)
 	GetRun(ctx context.Context, sessionID string) (*RunInfo, error)
-	CancelRun(ctx context.Context, sessionID string) error
+	CancelRun(ctx context.Context, sessionID string, runID string) error
 	SubscribeEvents(ctx context.Context, req SubscribeRequest) (EventStream, error)
 }
 
 // NewService creates the core einoai service.
-func NewService(chatModel model.ToolCallingChatModel, db *redis.Client) Service {
-	return newService(chatModel, db)
+func NewService(db *redis.Client) Service {
+	return newService(db)
 }
 
 func isTerminalRunStatus(status RunStatus) bool {

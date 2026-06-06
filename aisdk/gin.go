@@ -71,15 +71,15 @@ func HandleGetRun(c *gin.Context, svc einoai.Service, sessionID string) {
 }
 
 // HandleCancelRun is a composable convenience wrapper.
-func HandleCancelRun(c *gin.Context, svc einoai.Service, sessionID string) {
-	WriteCancelResponse(c, svc.CancelRun(c.Request.Context(), sessionID))
+func HandleCancelRun(c *gin.Context, svc einoai.Service, sessionID string, runID string) {
+	WriteCancelResponse(c, svc.CancelRun(c.Request.Context(), sessionID, runID))
 }
 
 // HandleSubscribeEvents is a composable convenience wrapper.
 func HandleSubscribeEvents(c *gin.Context, svc einoai.Service, sessionID string, runID string) {
 	stream, err := svc.SubscribeEvents(c.Request.Context(), einoai.SubscribeRequest{
-		SessionID:    sessionID,
-		AfterEventID: GetLastEventID(c),
+		SessionID: sessionID,
+		RunID:     runID,
 	})
 	if err != nil {
 		WriteError(c, err)
@@ -112,6 +112,7 @@ func HandleCompletions(c *gin.Context, svc einoai.Service, sessionID string, age
 	}
 	stream, err := svc.SubscribeEvents(c.Request.Context(), einoai.SubscribeRequest{
 		SessionID: run.SessionID,
+		RunID:     run.RunID,
 	})
 	if err != nil {
 		WriteError(c, err)

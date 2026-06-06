@@ -14,7 +14,7 @@ func (a *app) registerOpenAI(r gin.IRouter) {
 	r.POST("/sessions/:sessionId", a.createOpenAIRun)
 	r.GET("/sessions/:sessionId", a.getOpenAIRun)
 	r.POST("/sessions/:sessionId/runs/:run_id", a.subscribeOpenAIEvents)
-	r.POST("/sessions/:sessionId/cancel", a.cancelOpenAIRun)
+	r.POST("/sessions/:sessionId/runs/:run_id/cancel", a.cancelOpenAIRun)
 }
 
 func (a *app) openAICompletions(c *gin.Context) {
@@ -49,6 +49,7 @@ func (a *app) openAICompletions(c *gin.Context) {
 	}
 	stream, err := a.svc.SubscribeEvents(c.Request.Context(), einoai.SubscribeRequest{
 		SessionID: run.SessionID,
+		RunID:     run.RunID,
 	})
 	if err != nil {
 		openai.WriteError(c, err)
@@ -120,8 +121,8 @@ func (a *app) subscribeOpenAIEvents(c *gin.Context) {
 	sessionID := c.Param("sessionId")
 
 	stream, err := a.svc.SubscribeEvents(c.Request.Context(), einoai.SubscribeRequest{
-		SessionID:    sessionID,
-		AfterEventID: openAILastEventID(c),
+		SessionID: sessionID,
+		RunID:     c.Param("run_id"),
 	})
 	if err != nil {
 		openai.WriteError(c, err)
@@ -137,22 +138,9 @@ func (a *app) subscribeOpenAIEvents(c *gin.Context) {
 }
 
 func (a *app) cancelOpenAIRun(c *gin.Context) {
-	if err := a.svc.CancelRun(c.Request.Context(), c.Param("sessionId")); err != nil {
+	if err := a.svc.CancelRun(c.Request.Context(), c.Param("sessionId"), c.Param("run_id")); err != nil {
 		openai.WriteError(c, err)
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{"ok": true})
-}
-
-func openAILastEventID(c *gin.Context) string {
-	if v := c.Query("after"); v != "" {
-		return v
-	}
-	if v := c.Query("lastEventId"); v != "" {
-		return v
-	}
-	if v := c.GetHeader("Last-Event-ID"); v != "" {
-		return v
-	}
-	return ""
 }

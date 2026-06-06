@@ -27,8 +27,7 @@ type streamState struct {
 // WriteEventStream writes einoai events as AI SDK Data Stream Protocol SSE.
 func WriteEventStream(c *gin.Context, stream einoai.EventStream) {
 	setStreamHeaders(c)
-	state := &streamState{toolCalls: make(map[string]*toolState)}
-	after := GetLastEventID(c)
+	state := newStreamState()
 
 	for {
 		ev, err := stream.Next(c.Request.Context())
@@ -43,7 +42,7 @@ func WriteEventStream(c *gin.Context, stream einoai.EventStream) {
 		if ev == nil {
 			continue
 		}
-		if !state.started && after == "" {
+		if !state.started {
 			writePart(c, ev.ID, map[string]any{"type": "start", "messageId": "msg_" + ev.RunID})
 			writePart(c, ev.ID, map[string]any{"type": "start-step"})
 			state.started = true
@@ -101,20 +100,13 @@ func writeEvent(c *gin.Context, state *streamState, ev *einoai.RunEvent) bool {
 }
 
 func writeToolCall(c *gin.Context, state *streamState, id string, data einoai.ToolCallData) {
-	callID := data.ID
-	if callID == "" {
-		callID = fmt.Sprintf("tool_call_%d", data.Index)
+	if data.ID == "" || data.Name == "" {
+		return
 	}
-	st := state.toolCalls[callID]
+	st := state.toolCalls[data.ID]
 	if st == nil {
-		st = &toolState{id: callID}
-		state.toolCalls[callID] = st
-	}
-	if data.Name != "" {
-		st.name = data.Name
-	}
-	if st.name == "" {
-		st.name = "tool"
+		st = &toolState{id: data.ID, name: data.Name}
+		state.toolCalls[data.ID] = st
 	}
 	if !st.started {
 		writePart(c, id, map[string]any{"type": "tool-input-start", "toolCallId": st.id, "toolName": st.name})
@@ -132,9 +124,6 @@ func writeToolResult(c *gin.Context, state *streamState, id string, data einoai.
 		st = &toolState{id: data.ToolCallID, name: data.Name}
 		state.toolCalls[data.ToolCallID] = st
 	}
-	if st.name == "" {
-		st.name = "tool"
-	}
 	if !st.available {
 		writeToolAvailable(c, id, st)
 	}
@@ -146,6 +135,12 @@ func writePendingToolsAvailable(c *gin.Context, state *streamState, id string) {
 		if st.started && !st.available {
 			writeToolAvailable(c, id, st)
 		}
+	}
+}
+
+func newStreamState() *streamState {
+	return &streamState{
+		toolCalls: make(map[string]*toolState),
 	}
 }
 

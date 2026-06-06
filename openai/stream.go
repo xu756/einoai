@@ -14,12 +14,13 @@ import (
 )
 
 type chatCompletionChunk struct {
-	ID      string   `json:"id"`
-	Object  string   `json:"object"`
-	Created int64    `json:"created"`
-	Model   string   `json:"model,omitempty"`
-	Choices []choice `json:"choices"`
-	Usage   *usage   `json:"usage,omitempty"`
+	ID           string   `json:"id"`
+	Object       string   `json:"object"`
+	Created      int64    `json:"created"`
+	Model        string   `json:"model,omitempty"`
+	Choices      []choice `json:"choices"`
+	Usage        *usage   `json:"usage,omitempty"`
+	IncludeUsage bool     `json:"-"`
 }
 
 type choice struct {
@@ -63,22 +64,19 @@ type completionTokensDetails struct {
 	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 }
 
+type streamState struct {
+	completionID string
+	created      int64
+	modelName    string
+	includeUsage bool
+	toolCalls    map[string]bool
+}
+
 // WriteChatCompletionStream writes einoai events as OpenAI-compatible SSE chunks.
 func WriteChatCompletionStream(c *gin.Context, req ChatCompletionsRequest, stream einoai.EventStream) {
 	setStreamHeaders(c)
-	id := "chatcmpl-" + fmt.Sprintf("%d", time.Now().UnixNano())
-	created := time.Now().Unix()
-	modelName := req.Model
-	if modelName == "" {
-		modelName = "gpt-4"
-	}
-	writeChunk(c, "", chatCompletionChunk{
-		ID:      id,
-		Object:  "chat.completion.chunk",
-		Created: created,
-		Model:   modelName,
-		Choices: []choice{{Index: 0, Delta: delta{Role: "assistant"}, FinishReason: nil}},
-	})
+	state := newStreamState(req)
+	writeChunk(c, "", state.chunk([]choice{{Index: 0, Delta: delta{Role: "assistant"}, FinishReason: nil}}, nil))
 
 	for {
 		ev, err := stream.Next(c.Request.Context())
@@ -93,11 +91,75 @@ func WriteChatCompletionStream(c *gin.Context, req ChatCompletionsRequest, strea
 		if ev == nil {
 			continue
 		}
-		if writeEvent(c, ev, id, created, modelName) {
+		if writeEvent(c, state, ev) {
 			writeDone(c)
 			return
 		}
 	}
+}
+
+func newStreamState(req ChatCompletionsRequest) *streamState {
+	modelName := req.Model
+	if modelName == "" {
+		modelName = "gpt-4"
+	}
+	includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
+	return &streamState{
+		completionID: "chatcmpl-" + fmt.Sprintf("%d", time.Now().UnixNano()),
+		created:      time.Now().Unix(),
+		modelName:    modelName,
+		includeUsage: includeUsage,
+		toolCalls:    make(map[string]bool),
+	}
+}
+
+func (s *streamState) chunk(choices []choice, u *usage) chatCompletionChunk {
+	return chatCompletionChunk{
+		ID:           s.completionID,
+		Object:       "chat.completion.chunk",
+		Created:      s.created,
+		Model:        s.modelName,
+		Choices:      choices,
+		Usage:        u,
+		IncludeUsage: s.includeUsage,
+	}
+}
+
+func (c chatCompletionChunk) MarshalJSON() ([]byte, error) {
+	if c.IncludeUsage {
+		type chunkWithUsage struct {
+			ID      string   `json:"id"`
+			Object  string   `json:"object"`
+			Created int64    `json:"created"`
+			Model   string   `json:"model,omitempty"`
+			Choices []choice `json:"choices"`
+			Usage   *usage   `json:"usage"`
+		}
+		return json.Marshal(chunkWithUsage{
+			ID:      c.ID,
+			Object:  c.Object,
+			Created: c.Created,
+			Model:   c.Model,
+			Choices: c.Choices,
+			Usage:   c.Usage,
+		})
+	}
+	type chunkWithoutUsage struct {
+		ID      string   `json:"id"`
+		Object  string   `json:"object"`
+		Created int64    `json:"created"`
+		Model   string   `json:"model,omitempty"`
+		Choices []choice `json:"choices"`
+		Usage   *usage   `json:"usage,omitempty"`
+	}
+	return json.Marshal(chunkWithoutUsage{
+		ID:      c.ID,
+		Object:  c.Object,
+		Created: c.Created,
+		Model:   c.Model,
+		Choices: c.Choices,
+		Usage:   c.Usage,
+	})
 }
 
 // CollectChatCompletion aggregates a non-streaming response body.
@@ -145,10 +207,9 @@ func CollectChatCompletion(ctx context.Context, req ChatCompletionsRequest, stre
 	}, nil
 }
 
-func writeEvent(c *gin.Context, ev *einoai.RunEvent, id string, created int64, modelName string) bool {
+func writeEvent(c *gin.Context, state *streamState, ev *einoai.RunEvent) bool {
 	d := delta{}
 	var finishReason any
-	var u *usage
 
 	switch ev.Type {
 	case einoai.EventTextDelta:
@@ -159,15 +220,7 @@ func writeEvent(c *gin.Context, ev *einoai.RunEvent, id string, created int64, m
 		d.ReasoningContent = data.Delta
 	case einoai.EventToolCall:
 		data, _ := einoai.DecodeEventData[einoai.ToolCallData](ev)
-		d.ToolCalls = []toolCallDelta{{
-			Index: data.Index,
-			ID:    data.ID,
-			Type:  "function",
-			Function: functionCallDelta{
-				Name:      data.Name,
-				Arguments: data.Arguments,
-			},
-		}}
+		d.ToolCalls = []toolCallDelta{state.toolCallDelta(data)}
 	case einoai.EventToolResult:
 		return false
 	case einoai.EventFinish:
@@ -175,8 +228,10 @@ func writeEvent(c *gin.Context, ev *einoai.RunEvent, id string, created int64, m
 		if data.FinishReason != "" {
 			finishReason = normalizeFinishReason(data.FinishReason)
 		}
-		if finishReason != "tool_calls" {
-			u = convertUsage(data.Usage)
+		if finishReason != "tool_calls" && state.includeUsage {
+			writeChunk(c, ev.ID, state.chunk([]choice{{Index: 0, Delta: d, FinishReason: finishReason}}, nil))
+			writeChunk(c, "", state.chunk([]choice{}, convertUsage(data.Usage)))
+			return true
 		}
 	case einoai.EventError:
 		data, _ := einoai.DecodeEventData[einoai.ErrorData](ev)
@@ -186,15 +241,24 @@ func writeEvent(c *gin.Context, ev *einoai.RunEvent, id string, created int64, m
 		return false
 	}
 
-	writeChunk(c, ev.ID, chatCompletionChunk{
-		ID:      id,
-		Object:  "chat.completion.chunk",
-		Created: created,
-		Model:   modelName,
-		Choices: []choice{{Index: 0, Delta: d, FinishReason: finishReason}},
-		Usage:   u,
-	})
+	writeChunk(c, ev.ID, state.chunk([]choice{{Index: 0, Delta: d, FinishReason: finishReason}}, nil))
 	return ev.Type == einoai.EventFinish && finishReason != "tool_calls"
+}
+
+func (s *streamState) toolCallDelta(data einoai.ToolCallData) toolCallDelta {
+	out := toolCallDelta{
+		Index: data.Index,
+		Function: functionCallDelta{
+			Arguments: data.Arguments,
+		},
+	}
+	if !s.toolCalls[data.ID] {
+		out.ID = data.ID
+		out.Type = "function"
+		out.Function.Name = data.Name
+		s.toolCalls[data.ID] = true
+	}
+	return out
 }
 
 func normalizeFinishReason(reason string) string {

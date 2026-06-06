@@ -19,6 +19,14 @@ type runEventBuilder struct {
 	think            thinkSplitter
 	finished         bool
 	usage            *schema.TokenUsage
+	toolCalls        map[int]*toolCallState
+}
+
+type toolCallState struct {
+	id               string
+	name             string
+	pendingArguments string
+	started          bool
 }
 
 func newRunEventBuilder(service *service, sessionID, runID string) *runEventBuilder {
@@ -26,6 +34,7 @@ func newRunEventBuilder(service *service, sessionID, runID string) *runEventBuil
 		service:   service,
 		sessionID: sessionID,
 		runID:     runID,
+		toolCalls: make(map[int]*toolCallState),
 	}
 	b.resetIDs()
 	return b
@@ -41,6 +50,7 @@ func (b *runEventBuilder) advanceStep() {
 	b.textStarted = false
 	b.reasoningStarted = false
 	b.think = thinkSplitter{}
+	b.toolCalls = make(map[int]*toolCallState)
 	b.resetIDs()
 }
 
@@ -59,17 +69,8 @@ func (b *runEventBuilder) writeMessage(ctx context.Context, msg *schema.Message)
 		}
 	}
 	if len(msg.ToolCalls) > 0 {
-		for i, tc := range msg.ToolCalls {
-			index := i
-			if tc.Index != nil {
-				index = *tc.Index
-			}
-			if _, err := b.service.appendEvent(ctx, b.sessionID, b.runID, EventToolCall, ToolCallData{
-				ID:        tc.ID,
-				Name:      tc.Function.Name,
-				Arguments: tc.Function.Arguments,
-				Index:     index,
-			}); err != nil {
+		for i := range msg.ToolCalls {
+			if err := b.writeToolCall(ctx, i, msg.ToolCalls[i]); err != nil {
 				return err
 			}
 		}
@@ -138,6 +139,9 @@ func (b *runEventBuilder) writeReasoning(ctx context.Context, delta string) erro
 }
 
 func (b *runEventBuilder) closeOpenBlocks(ctx context.Context) error {
+	if err := b.flushToolCalls(ctx); err != nil {
+		return err
+	}
 	for _, part := range b.think.flush() {
 		if part.reasoning {
 			if err := b.writeReasoning(ctx, part.text); err != nil {
@@ -160,6 +164,71 @@ func (b *runEventBuilder) closeOpenBlocks(ctx context.Context) error {
 		b.textStarted = false
 	}
 	return nil
+}
+
+func (b *runEventBuilder) writeToolCall(ctx context.Context, position int, tc schema.ToolCall) error {
+	index := position
+	if tc.Index != nil {
+		index = *tc.Index
+	}
+	st := b.toolCalls[index]
+	if st == nil {
+		st = &toolCallState{}
+		b.toolCalls[index] = st
+	}
+	if tc.ID != "" {
+		st.id = tc.ID
+	}
+	if tc.Function.Name != "" {
+		st.name = tc.Function.Name
+	}
+	if tc.Function.Arguments != "" {
+		st.pendingArguments += tc.Function.Arguments
+	}
+	return b.flushToolCall(ctx, index, st)
+}
+
+func (b *runEventBuilder) flushToolCalls(ctx context.Context) error {
+	for index, st := range b.toolCalls {
+		if err := b.flushToolCall(ctx, index, st); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b *runEventBuilder) flushToolCall(ctx context.Context, index int, st *toolCallState) error {
+	if st == nil || (st.started && st.pendingArguments == "") {
+		return nil
+	}
+	if st.id == "" || st.name == "" {
+		if st.pendingArguments == "" && !st.started {
+			return nil
+		}
+		return fmt.Errorf("tool call %d missing id or name", index)
+	}
+	if !st.started {
+		if _, err := b.service.appendEvent(ctx, b.sessionID, b.runID, EventToolCall, ToolCallData{
+			ID:    st.id,
+			Name:  st.name,
+			Index: index,
+		}); err != nil {
+			return err
+		}
+		st.started = true
+	}
+	if st.pendingArguments == "" {
+		return nil
+	}
+	arguments := st.pendingArguments
+	st.pendingArguments = ""
+	_, err := b.service.appendEvent(ctx, b.sessionID, b.runID, EventToolCall, ToolCallData{
+		ID:        st.id,
+		Name:      st.name,
+		Arguments: arguments,
+		Index:     index,
+	})
+	return err
 }
 
 func (b *runEventBuilder) writeFinish(ctx context.Context, reason string, usage *schema.TokenUsage) error {
