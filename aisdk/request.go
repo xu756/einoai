@@ -15,20 +15,30 @@ type CreateRunRequest struct {
 
 // Message is an AI SDK UI message.
 type Message struct {
-	Role     string         `json:"role,omitempty"`
-	Parts    []Part         `json:"parts,omitempty"`
-	Content  string         `json:"content,omitempty"`
+	ID       string         `json:"id,omitempty"`
+	Role     string         `json:"role"`
 	Metadata map[string]any `json:"metadata,omitempty"`
-	Data     map[string]any `json:"data,omitempty"`
+	Parts    []Part         `json:"parts"`
 }
 
-// Part is an AI SDK message part.
+// Part is an AI SDK UI message part.
 type Part struct {
-	Type      string `json:"type,omitempty"`
-	Text      string `json:"text,omitempty"`
-	URL       string `json:"url,omitempty"`
-	MediaType string `json:"mediaType,omitempty"`
-	Filename  string `json:"filename,omitempty"`
+	ID               string         `json:"id,omitempty"`
+	Type             string         `json:"type"`
+	Text             string         `json:"text,omitempty"`
+	State            string         `json:"state,omitempty"`
+	Data             any            `json:"data,omitempty"`
+	ToolCallID       string         `json:"toolCallId,omitempty"`
+	Input            any            `json:"input,omitempty"`
+	Output           any            `json:"output,omitempty"`
+	ErrorText        string         `json:"errorText,omitempty"`
+	ProviderExecuted *bool          `json:"providerExecuted,omitempty"`
+	URL              string         `json:"url,omitempty"`
+	MediaType        string         `json:"mediaType,omitempty"`
+	Filename         string         `json:"filename,omitempty"`
+	SourceID         string         `json:"sourceId,omitempty"`
+	Title            string         `json:"title,omitempty"`
+	ProviderMetadata map[string]any `json:"providerMetadata,omitempty"`
 }
 
 // DecodeCreateRunRequest decodes a create-run request body.

@@ -38,6 +38,21 @@ func (s *service) CreateRun(ctx context.Context, req CreateRunRequest) (*RunInfo
 	if len(req.Messages) == 0 {
 		return nil, errors.New("messages is required")
 	}
+	snapshotMessages, err := requestSnapshotMessages(req.Messages)
+	if err != nil {
+		return nil, err
+	}
+	currentRun, err := s.store.getCurrentRun(ctx, req.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	if currentRun != nil && !isTerminalRunStatus(currentRun.Status) {
+		return nil, fmt.Errorf("run %s for session %s is still active", currentRun.RunID, req.SessionID)
+	}
+	if currentRun != nil {
+		_ = s.store.clearCurrentRunIfMatches(ctx, req.SessionID, currentRun.RunID)
+	}
+	runMessages := append([]*schema.Message{}, snapshotMessages...)
 
 	run := &RunInfo{
 		SessionID: req.SessionID,
@@ -48,13 +63,16 @@ func (s *service) CreateRun(ctx context.Context, req CreateRunRequest) (*RunInfo
 	if err := s.store.initRun(ctx, run); err != nil {
 		return nil, err
 	}
+	if err := s.store.setActiveMessages(ctx, run.SessionID, run.RunID, snapshotMessages); err != nil {
+		return nil, err
+	}
 	if _, err := s.appendEvent(context.Background(), run.SessionID, run.RunID, EventRunCreated, nil); err != nil {
 		return nil, err
 	}
 
 	runCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	s.registerRunCancel(run.RunID, cancel)
-	go s.executeRun(runCtx, cancel, run.SessionID, run.RunID, req.Messages, req.Agent)
+	go s.executeRun(runCtx, cancel, run.SessionID, run.RunID, runMessages, req.Agent)
 
 	return run, nil
 }
@@ -72,6 +90,37 @@ func (s *service) GetRun(ctx context.Context, sessionID string) (*RunInfo, error
 		return nil, nil
 	}
 	return run, nil
+}
+
+func requestSnapshotMessages(messages []*schema.Message) ([]*schema.Message, error) {
+	if len(messages) == 0 {
+		return nil, errors.New("messages is required")
+	}
+	for i, msg := range messages {
+		if msg == nil {
+			return nil, fmt.Errorf("message %d is required", i)
+		}
+	}
+	return append([]*schema.Message{}, messages...), nil
+}
+
+func (s *service) GetMessages(ctx context.Context, sessionID string) ([]*schema.Message, error) {
+	messages, err := s.store.getSessionMessages(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	run, err := s.GetRun(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if run == nil {
+		return messages, nil
+	}
+	active, err := s.store.getActiveMessages(ctx, sessionID, run.RunID)
+	if err != nil {
+		return nil, err
+	}
+	return active, nil
 }
 
 func (s *service) CancelRun(ctx context.Context, sessionID string, runID string) error {
@@ -97,7 +146,13 @@ func (s *service) CancelRun(ctx context.Context, sessionID string, runID string)
 	if err := s.appendFinish(ctx, sessionID, runID, "cancelled", nil); err != nil {
 		return err
 	}
-	return s.store.setRunStatus(ctx, sessionID, runID, RunStatusCancelled, "")
+	if err := s.store.commitRunMessages(ctx, sessionID, runID, nil); err != nil {
+		return err
+	}
+	if err := s.store.setRunStatus(ctx, sessionID, runID, RunStatusCancelled, ""); err != nil {
+		return err
+	}
+	return s.store.clearCurrentRunIfMatches(ctx, sessionID, runID)
 }
 
 func (s *service) SubscribeEvents(ctx context.Context, req SubscribeRequest) (EventStream, error) {
@@ -142,21 +197,26 @@ func (s *service) executeRun(ctx context.Context, cancel context.CancelFunc, ses
 		if errors.Is(err, context.Canceled) {
 			_ = state.closeOpenBlocks(context.Background())
 			_ = s.appendFinish(context.Background(), sessionID, runID, "cancelled", nil)
+			_ = s.store.commitRunMessages(context.Background(), sessionID, runID, nil)
 			_ = s.store.setRunStatus(context.Background(), sessionID, runID, RunStatusCancelled, "")
+			_ = s.store.clearCurrentRunIfMatches(context.Background(), sessionID, runID)
 			return
 		}
 		_ = state.closeOpenBlocks(context.Background())
 		_, _ = s.appendEvent(context.Background(), sessionID, runID, EventError, ErrorData{Message: err.Error()})
 		_ = s.appendFinish(context.Background(), sessionID, runID, "error", nil)
+		_ = s.store.commitRunMessages(context.Background(), sessionID, runID, nil)
 		_ = s.store.setRunStatus(context.Background(), sessionID, runID, RunStatusFailed, err.Error())
+		_ = s.store.clearCurrentRunIfMatches(context.Background(), sessionID, runID)
 		return
 	}
 
 	if !state.finished {
-		_ = state.closeOpenBlocks(context.Background())
-		_ = s.appendFinish(context.Background(), sessionID, runID, "stop", state.usage)
+		_ = state.writeFinish(context.Background(), "stop", state.usage)
 	}
+	_ = s.store.commitRunMessages(context.Background(), sessionID, runID, state.outputMessages)
 	_ = s.store.setRunStatus(context.Background(), sessionID, runID, RunStatusCompleted, "")
+	_ = s.store.clearCurrentRunIfMatches(context.Background(), sessionID, runID)
 }
 
 func (s *service) streamAgentEvents(ctx context.Context, iter *adk.AsyncIterator[*adk.AgentEvent], state *runEventBuilder) error {

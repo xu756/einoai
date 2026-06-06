@@ -101,20 +101,22 @@ func (a *app) createOpenAIRun(c *gin.Context) {
 		writeOpenAIError(c, err)
 		return
 	}
-	c.JSON(http.StatusAccepted, gin.H{
-		"sessionId": run.SessionID,
-		"run_id":    run.RunID,
-		"status":    run.Status,
-	})
+	c.JSON(http.StatusAccepted, openai.NewCreateRunResponse(run))
 }
 
 func (a *app) getOpenAIRun(c *gin.Context) {
-	run, err := a.svc.GetRun(c.Request.Context(), c.Param("sessionId"))
+	sessionID := c.Param("sessionId")
+	run, err := a.svc.GetRun(c.Request.Context(), sessionID)
 	if err != nil {
 		writeOpenAIError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"run": run})
+	messages, err := a.svc.GetMessages(c.Request.Context(), sessionID)
+	if err != nil {
+		writeOpenAIError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, openai.NewRunResponse(run, messages))
 }
 
 func (a *app) subscribeOpenAIEvents(c *gin.Context) {
@@ -142,5 +144,5 @@ func (a *app) cancelOpenAIRun(c *gin.Context) {
 		writeOpenAIError(c, err)
 		return
 	}
-	c.JSON(http.StatusAccepted, gin.H{"ok": true})
+	c.JSON(http.StatusAccepted, openai.NewCancelResponse())
 }

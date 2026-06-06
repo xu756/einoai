@@ -49,6 +49,7 @@ type RunInfo struct {
 type Service interface {
 	CreateRun(ctx context.Context, req CreateRunRequest) (*RunInfo, error)
 	GetRun(ctx context.Context, sessionID string) (*RunInfo, error)
+	GetMessages(ctx context.Context, sessionID string) ([]*schema.Message, error)
 	CancelRun(ctx context.Context, sessionID string, runID string) error
 	SubscribeEvents(ctx context.Context, req SubscribeRequest) (EventStream, error)
 }

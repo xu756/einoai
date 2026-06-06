@@ -1,25 +1,24 @@
-package aisdk
+package openai
 
 import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/xu756/einoai"
 )
 
-// CreateRunResponse is the default AI SDK create-run response shape.
+// CreateRunResponse is the default OpenAI-compatible create-run response shape.
 type CreateRunResponse struct {
 	SessionID string           `json:"sessionId"`
 	RunID     string           `json:"run_id"`
 	Status    einoai.RunStatus `json:"status"`
-	Metadata  map[string]any   `json:"metadata,omitempty"`
 }
 
-// RunResponse is the default AI SDK get-run response shape.
+// RunResponse is the default OpenAI-compatible get-run response shape.
 type RunResponse struct {
 	Run      *einoai.RunInfo `json:"run"`
-	Messages []Message       `json:"messages"`
+	Messages []ChatMessage   `json:"messages"`
 }
 
-// CancelResponse is the default AI SDK cancel response shape.
+// CancelResponse is the default OpenAI-compatible cancel response shape.
 type CancelResponse struct {
 	OK bool `json:"ok"`
 }
@@ -33,11 +32,10 @@ func NewCreateRunResponse(run *einoai.RunInfo) CreateRunResponse {
 		SessionID: run.SessionID,
 		RunID:     run.RunID,
 		Status:    run.Status,
-		Metadata:  run.Metadata,
 	}
 }
 
-// NewRunResponse converts a run into a response struct.
+// NewRunResponse converts stored schema messages into OpenAI chat messages.
 func NewRunResponse(run *einoai.RunInfo, messages []*schema.Message) RunResponse {
 	return RunResponse{
 		Run:      run,

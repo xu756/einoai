@@ -45,6 +45,23 @@ func ToSchemaMessages(req ChatCompletionsRequest) ([]*schema.Message, error) {
 	return messages, nil
 }
 
+// FromSchemaMessages converts Eino schema messages into OpenAI chat messages.
+func FromSchemaMessages(messages []*schema.Message) []ChatMessage {
+	out := make([]ChatMessage, 0, len(messages))
+	for _, msg := range messages {
+		if msg == nil {
+			continue
+		}
+		out = append(out, ChatMessage{
+			Role:       fromSchemaRole(msg.Role),
+			Content:    textContent(msg.Content),
+			ToolCallID: msg.ToolCallID,
+			ToolCalls:  fromSchemaToolCalls(msg.ToolCalls),
+		})
+	}
+	return out
+}
+
 func toSchemaRole(role string) schema.RoleType {
 	switch role {
 	case "assistant":
@@ -56,6 +73,43 @@ func toSchemaRole(role string) schema.RoleType {
 	default:
 		return schema.User
 	}
+}
+
+func fromSchemaRole(role schema.RoleType) string {
+	switch role {
+	case schema.Assistant:
+		return "assistant"
+	case schema.System:
+		return "system"
+	case schema.Tool:
+		return "tool"
+	default:
+		return "user"
+	}
+}
+
+func fromSchemaToolCalls(calls []schema.ToolCall) []ToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]ToolCall, 0, len(calls))
+	for _, call := range calls {
+		out = append(out, ToolCall{
+			ID:    call.ID,
+			Type:  call.Type,
+			Index: call.Index,
+			Function: FunctionCall{
+				Name:      call.Function.Name,
+				Arguments: call.Function.Arguments,
+			},
+		})
+	}
+	return out
+}
+
+func textContent(text string) json.RawMessage {
+	data, _ := json.Marshal(text)
+	return data
 }
 
 func contentToText(raw json.RawMessage) string {

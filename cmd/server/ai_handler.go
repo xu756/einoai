@@ -103,7 +103,12 @@ func (a *app) getAIRun(c *gin.Context) {
 		writeAIError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, aisdk.NewRunResponse(run))
+	messages, err := a.svc.GetMessages(c.Request.Context(), sessionID)
+	if err != nil {
+		writeAIError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, aisdk.NewRunResponse(run, messages))
 }
 
 func (a *app) subscribeAIEvents(c *gin.Context) {

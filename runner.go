@@ -20,6 +20,8 @@ type runEventBuilder struct {
 	finished         bool
 	usage            *schema.TokenUsage
 	toolCalls        map[int]*toolCallState
+	assistantChunks  []*schema.Message
+	outputMessages   []*schema.Message
 }
 
 type toolCallState struct {
@@ -51,12 +53,16 @@ func (b *runEventBuilder) advanceStep() {
 	b.reasoningStarted = false
 	b.think = thinkSplitter{}
 	b.toolCalls = make(map[int]*toolCallState)
+	b.assistantChunks = nil
 	b.resetIDs()
 }
 
 func (b *runEventBuilder) writeMessage(ctx context.Context, msg *schema.Message) error {
 	if msg == nil {
 		return nil
+	}
+	if shouldCollectAssistantChunk(msg) {
+		b.assistantChunks = append(b.assistantChunks, msg)
 	}
 	if msg.ReasoningContent != "" {
 		if err := b.writeReasoning(ctx, msg.ReasoningContent); err != nil {
@@ -76,6 +82,7 @@ func (b *runEventBuilder) writeMessage(ctx context.Context, msg *schema.Message)
 		}
 	}
 	if msg.Role == schema.Tool {
+		b.outputMessages = append(b.outputMessages, msg)
 		if _, err := b.service.appendEvent(ctx, b.sessionID, b.runID, EventToolResult, ToolResultData{
 			ToolCallID: msg.ToolCallID,
 			Name:       msg.ToolName,
@@ -93,6 +100,16 @@ func (b *runEventBuilder) writeMessage(ctx context.Context, msg *schema.Message)
 		}
 	}
 	return nil
+}
+
+func shouldCollectAssistantChunk(msg *schema.Message) bool {
+	if msg.Role != "" && msg.Role != schema.Assistant {
+		return false
+	}
+	return msg.Content != "" ||
+		msg.ReasoningContent != "" ||
+		len(msg.ToolCalls) > 0 ||
+		len(msg.AssistantGenMultiContent) > 0
 }
 
 func (b *runEventBuilder) writeContent(ctx context.Context, content string) error {
@@ -238,6 +255,9 @@ func (b *runEventBuilder) writeFinish(ctx context.Context, reason string, usage 
 	if err := b.closeOpenBlocks(ctx); err != nil {
 		return err
 	}
+	if err := b.commitAssistantMessage(); err != nil {
+		return err
+	}
 	if err := b.service.appendFinish(ctx, b.sessionID, b.runID, reason, b.usage); err != nil {
 		return err
 	}
@@ -246,5 +266,21 @@ func (b *runEventBuilder) writeFinish(ctx context.Context, reason string, usage 
 		return nil
 	}
 	b.finished = true
+	return nil
+}
+
+func (b *runEventBuilder) commitAssistantMessage() error {
+	if len(b.assistantChunks) == 0 {
+		return nil
+	}
+	msg, err := schema.ConcatMessages(b.assistantChunks)
+	if err != nil {
+		return err
+	}
+	if msg.Role == "" {
+		msg.Role = schema.Assistant
+	}
+	b.outputMessages = append(b.outputMessages, msg)
+	b.assistantChunks = nil
 	return nil
 }
