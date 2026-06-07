@@ -143,6 +143,51 @@ func TestServiceGetMessagesReturnsActiveSnapshotWhenRunIsActive(t *testing.T) {
 	}
 }
 
+func TestServiceDeleteSessionRemovesMessagesAndCurrentRun(t *testing.T) {
+	store, cleanup := newTestRedisStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	if err := store.replaceSessionMessages(ctx, "s1", []*schema.Message{
+		{Role: schema.User, Content: "hello"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	run := &RunInfo{SessionID: "s1", RunID: "r1", Status: RunStatusRunning}
+	if err := store.initRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.setActiveMessages(ctx, "s1", "r1", []*schema.Message{
+		{Role: schema.User, Content: "active"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := &service{
+		store:       store,
+		runCancels:  make(map[string]context.CancelFunc),
+		deletedRuns: make(map[string]struct{}),
+	}
+	if err := svc.DeleteSession(ctx, "s1"); err != nil {
+		t.Fatal(err)
+	}
+
+	messages, err := svc.GetMessages(ctx, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("expected deleted session messages to be empty, got %#v", messages)
+	}
+	run, err = svc.GetRun(ctx, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run != nil {
+		t.Fatalf("expected deleted session run to be empty, got %#v", run)
+	}
+}
+
 func TestCommitRunMessagesReplacesHistoryWithActiveSnapshotAndOutput(t *testing.T) {
 	store, cleanup := newTestRedisStore(t)
 	defer cleanup()

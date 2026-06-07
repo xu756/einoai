@@ -10,6 +10,7 @@
 - Redis 保存 run metadata、status、events、current run、active messages、committed messages、error、usage。
 - session 历史以 `[]*schema.Message` 存储，协议格式只在 HTTP 边界转换。
 - `GetMessages` 返回当前 session 的 schema 历史；有运行中 run 时返回 active snapshot，不包含正在流式生成的 assistant 内容。
+- `DeleteSession` 删除 session history、active snapshot、run meta、events 和 current run；如果有运行中 run 会先中断。
 - `SubscribeEvents` 按 `sessionID + runID` 订阅当前 run，不使用 `Last-Event-ID` 断点恢复。
 - `CancelRun` 使用 `sessionID + runID` 精确中断 run。
 - 支持 AI SDK / assistant-ui UI Message Stream。
@@ -86,6 +87,7 @@ type Service interface {
     CreateRun(ctx context.Context, req CreateRunRequest) (*RunInfo, error)
     GetRun(ctx context.Context, sessionID string) (*RunInfo, error)
     GetMessages(ctx context.Context, sessionID string) ([]*schema.Message, error)
+    DeleteSession(ctx context.Context, sessionID string) error
     CancelRun(ctx context.Context, sessionID string, runID string) error
     SubscribeEvents(ctx context.Context, req SubscribeRequest) (EventStream, error)
 }
@@ -218,7 +220,8 @@ func (h *Handler) RunAIEvents(c *gin.Context) {
     }
     defer stream.Close()
 
-    aisdk.WriteEventStream(c, stream)
+    aisdk.SetEventStreamHeaders(c.Writer.Header())
+    _ = aisdk.WriteEventStreamTo(c.Request.Context(), c.Writer, c.Writer.Flush, stream)
 }
 ```
 
@@ -271,7 +274,8 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
     defer stream.Close()
 
     if req.Stream {
-        openai.WriteChatCompletionStream(c, req, stream)
+        openai.SetChatCompletionStreamHeaders(c.Writer.Header())
+        _ = openai.WriteChatCompletionStreamTo(c.Request.Context(), c.Writer, c.Writer.Flush, req, stream)
         return
     }
 
@@ -312,14 +316,20 @@ func (h *Handler) GetOpenAIRun(c *gin.Context) {
 - `aisdk.NewCreateRunResponse`
 - `aisdk.NewRunResponse`
 - `aisdk.NewCancelResponse`
+- `aisdk.NewDeleteSessionResponse`
 - `openai.NewCreateRunResponse`
 - `openai.NewRunResponse`
 - `openai.NewCancelResponse`
+- `openai.NewDeleteSessionResponse`
 
-只有流式写出函数接收 `*gin.Context`：
+流式输出也不依赖 Gin，直接接通用 writer：
 
-- `aisdk.WriteEventStream`
-- `openai.WriteChatCompletionStream`
+- `aisdk.SetEventStreamHeaders(header)`
+- `aisdk.WriteEventStreamTo(ctx, writer, flush, stream)`
+- `openai.SetChatCompletionStreamHeaders(header)`
+- `openai.WriteChatCompletionStreamTo(ctx, writer, flush, req, stream)`
+
+`writer` 只需要实现 `io.Writer`，`flush` 是可选的 `func()`。Hertz、net/http、fasthttp 或自定义网关都可以用这组函数自己集成 SSE。
 
 ## 运行示例服务
 
@@ -377,6 +387,7 @@ Redis 保存：
 
 ## 中断与订阅
 
+- `DeleteSession(ctx, sessionID)` 会删除该 session 的 history、active snapshot、run meta、events 和 current run；如果有运行中 run 会先中断。
 - `CancelRun(ctx, sessionID, runID)` 会取消指定 run。
 - 取消后写入 `finish` 事件，finish reason 为 `cancelled`，状态更新为 `cancelled`。
 - `SubscribeEvents(ctx, SubscribeRequest{SessionID, RunID})` 订阅指定 run。

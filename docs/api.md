@@ -29,14 +29,14 @@ GET /ping
 ## 核心约定
 
 - 一个 `sessionId` 同一时间只对应一个 current run。
-- 查询、订阅、取消都以 `sessionId` 为主。
+- 查询、删除以 `sessionId` 为主；订阅、取消以 `sessionId + runID` 为主。
 - 创建新 run 会覆盖该 session 的 current run 指针。
 - Redis 保存 run meta、status、events、current run、error、usage、metadata。
 - `adk.Agent` 不保存到 Redis，由业务方每次创建 run 时传入。
 - 请求只使用标准 `messages` 数组，不支持旧的根级 `message` 字段。
 - 不会只取最后一条 user message。
 - 不会生成默认兜底消息。
-- 示例路由里订阅路径保留了 `:run_id` 参数，但当前核心服务按 `sessionId` 查找 current run。
+- 删除 session 会删除 history、active snapshot、run meta、events 和 current run；如果有运行中 run 会先中断。
 
 ## Run 状态
 
@@ -273,10 +273,24 @@ data: {"type":"tool-input-available","toolCallId":"call_001","toolName":"get_wea
 data: {"type":"tool-output-available","toolCallId":"call_001","output":{"temperature":26}}
 ```
 
-### 取消当前 run
+### 取消 run
 
 ```http
-POST /api/usechat/sessions/:sessionId/cancel
+POST /api/usechat/sessions/:sessionId/runs/:run_id/cancel
+```
+
+响应：
+
+```json
+{
+  "ok": true
+}
+```
+
+### 删除 session
+
+```http
+DELETE /api/usechat/sessions/:sessionId
 ```
 
 响应：
@@ -480,21 +494,27 @@ Query 参数：
 | 参数 | 说明 |
 | --- | --- |
 | `model` | 可选，用于 OpenAI chunk 的 `model` 字段 |
-| `after` | 从指定 event id 之后恢复 |
-| `lastEventId` | 同 `after` |
-
-也支持 Header：
-
-```text
-Last-Event-ID: <event_id>
-```
 
 响应为 OpenAI-compatible streaming chunk，格式同 `/api/v1/chat/completions` 的流式响应。
 
-### 取消当前 run
+### 取消 run
 
 ```http
-POST /api/v1/sessions/:sessionId/cancel
+POST /api/v1/sessions/:sessionId/runs/:run_id/cancel
+```
+
+响应：
+
+```json
+{
+  "ok": true
+}
+```
+
+### 删除 session
+
+```http
+DELETE /api/v1/sessions/:sessionId
 ```
 
 响应：
@@ -540,6 +560,7 @@ type Service interface {
     CreateRun(ctx context.Context, req CreateRunRequest) (*RunInfo, error)
     GetRun(ctx context.Context, sessionID string) (*RunInfo, error)
     GetMessages(ctx context.Context, sessionID string) ([]*schema.Message, error)
+    DeleteSession(ctx context.Context, sessionID string) error
     CancelRun(ctx context.Context, sessionID string, runID string) error
     SubscribeEvents(ctx context.Context, req SubscribeRequest) (EventStream, error)
 }
@@ -640,7 +661,8 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
     }
     defer stream.Close()
 
-    openai.WriteChatCompletionStream(c, req, stream)
+    openai.SetChatCompletionStreamHeaders(c.Writer.Header())
+    _ = openai.WriteChatCompletionStreamTo(c.Request.Context(), c.Writer, c.Writer.Flush, req, stream)
 }
 ```
 

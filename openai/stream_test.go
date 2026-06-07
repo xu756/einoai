@@ -1,18 +1,16 @@
 package openai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/xu756/einoai"
 
 	"github.com/cloudwego/eino/schema"
-	"github.com/gin-gonic/gin"
 )
 
 type sliceEventStream struct {
@@ -34,12 +32,9 @@ func (s *sliceEventStream) Close() error {
 }
 
 func TestWriteChatCompletionStreamWritesStandardToolCallDeltas(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	var buf bytes.Buffer
 
-	WriteChatCompletionStream(c, ChatCompletionsRequest{
+	err := WriteChatCompletionStreamTo(context.Background(), &buf, nil, ChatCompletionsRequest{
 		Model:  "gpt-4o",
 		Stream: true,
 	}, &sliceEventStream{events: []*einoai.RunEvent{
@@ -71,8 +66,11 @@ func TestWriteChatCompletionStreamWritesStandardToolCallDeltas(t *testing.T) {
 			Data:  einoai.FinishData{FinishReason: "tool_calls"},
 		},
 	}})
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	chunks := decodeChunks(t, rec.Body.String())
+	chunks := decodeChunks(t, buf.String())
 	if len(chunks) != 4 {
 		t.Fatalf("expected role, tool start, tool args, finish chunks, got %d", len(chunks))
 	}
@@ -99,12 +97,9 @@ func TestWriteChatCompletionStreamWritesStandardToolCallDeltas(t *testing.T) {
 }
 
 func TestWriteChatCompletionStreamWritesUsageChunkWhenRequested(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	var buf bytes.Buffer
 
-	WriteChatCompletionStream(c, ChatCompletionsRequest{
+	err := WriteChatCompletionStreamTo(context.Background(), &buf, nil, ChatCompletionsRequest{
 		Model:  "gpt-4o",
 		Stream: true,
 		StreamOptions: &StreamOptions{
@@ -131,12 +126,15 @@ func TestWriteChatCompletionStreamWritesUsageChunkWhenRequested(t *testing.T) {
 			},
 		},
 	}})
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	body := rec.Body.String()
+	body := buf.String()
 	if strings.Count(body, `"usage":null`) != 3 {
 		t.Fatalf("expected usage:null on non-usage chunks, got:\n%s", body)
 	}
-	chunks := decodeChunks(t, rec.Body.String())
+	chunks := decodeChunks(t, buf.String())
 	if len(chunks) != 4 {
 		t.Fatalf("expected role, text, finish, usage chunks, got %d", len(chunks))
 	}
@@ -151,6 +149,41 @@ func TestWriteChatCompletionStreamWritesUsageChunkWhenRequested(t *testing.T) {
 	}
 	if chunks[3].Usage == nil || chunks[3].Usage.TotalTokens != 5 {
 		t.Fatalf("expected final usage chunk, got %#v", chunks[3].Usage)
+	}
+}
+
+func TestWriteChatCompletionStreamToWritesWithoutGin(t *testing.T) {
+	var buf bytes.Buffer
+	err := WriteChatCompletionStreamTo(context.Background(), &buf, nil, ChatCompletionsRequest{
+		Model:  "gpt-4o",
+		Stream: true,
+	}, &sliceEventStream{events: []*einoai.RunEvent{
+		{
+			ID:    "1-0",
+			RunID: "run_1",
+			Type:  einoai.EventTextDelta,
+			Data:  einoai.TextData{Delta: "hello"},
+		},
+		{
+			ID:    "1-1",
+			RunID: "run_1",
+			Type:  einoai.EventFinish,
+			Data:  einoai.FinishData{FinishReason: "stop"},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	chunks := decodeChunks(t, buf.String())
+	if len(chunks) != 3 {
+		t.Fatalf("expected role, text, finish chunks, got %d", len(chunks))
+	}
+	if chunks[1].Choices[0].Delta.Content != "hello" {
+		t.Fatalf("expected text delta, got %#v", chunks[1])
+	}
+	if !strings.Contains(buf.String(), "data: [DONE]") {
+		t.Fatalf("expected done event, got:\n%s", buf.String())
 	}
 }
 

@@ -2,7 +2,7 @@
 
 `github.com/xu756/einoai/openai` 是 OpenAI-compatible 协议适配包。它负责解码 chat completions 请求、转换 OpenAI messages，并把核心 `einoai.RunEvent` 输出为 OpenAI-compatible streaming chunk。
 
-这个包不注册 `/v1/chat/completions` 或任何固定路由。普通请求解析和响应构造不依赖 Gin；只有 `WriteChatCompletionStream` 这个流式写出函数接收 `*gin.Context`。
+这个包不注册 `/v1/chat/completions` 或任何固定路由，也不依赖 Gin。普通请求解析、响应构造和 SSE 写出都通过框架无关函数完成；示例服务里的 Gin handler 只是自己把 `gin.Context` 的 writer 接进来。
 
 ## 职责
 
@@ -89,7 +89,9 @@ resp := openai.NewRunResponse(run, schemaMessages)
 | `NewCreateRunResponse(run)` | 构造创建 run JSON 响应结构体 |
 | `NewRunResponse(run, messages)` | 构造查询 run JSON 响应结构体，并转换 history |
 | `NewCancelResponse()` | 构造取消 run JSON 响应结构体 |
-| `WriteChatCompletionStream(c, req, stream)` | 写 OpenAI-compatible SSE 流 |
+| `NewDeleteSessionResponse()` | 构造删除 session JSON 响应结构体 |
+| `SetChatCompletionStreamHeaders(header)` | 设置 OpenAI-compatible SSE 响应头 |
+| `WriteChatCompletionStreamTo(ctx, writer, flush, req, stream)` | 写 OpenAI-compatible SSE 到任意 `io.Writer` |
 | `CollectChatCompletion(ctx, req, stream)` | 聚合非流式响应 body |
 
 ## Session ID 解析
@@ -157,7 +159,8 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
     defer stream.Close()
 
     if req.Stream {
-        openai.WriteChatCompletionStream(c, req, stream)
+        openai.SetChatCompletionStreamHeaders(c.Writer.Header())
+        _ = openai.WriteChatCompletionStreamTo(c.Request.Context(), c.Writer, c.Writer.Flush, req, stream)
         return
     }
 
@@ -169,6 +172,22 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
     c.JSON(http.StatusOK, body)
 }
 ```
+
+非 Gin 框架也是同一组通用 writer：
+
+```go
+openai.SetChatCompletionStreamHeaders(header)
+
+err := openai.WriteChatCompletionStreamTo(
+    ctx,
+    writer,
+    flush,
+    req,
+    stream,
+)
+```
+
+`writer` 只需要实现 `io.Writer`，`flush` 可以为 `nil`。Hertz 等框架可以把自己的 stream writer 接到这里。
 
 查询 run 和历史消息：
 
@@ -205,9 +224,23 @@ func (h *Handler) CancelOpenAIRun(c *gin.Context) {
 }
 ```
 
+删除 session：
+
+```go
+func (h *Handler) DeleteOpenAISession(c *gin.Context) {
+    err := h.AIService.DeleteSession(c.Request.Context(), c.Param("sessionId"))
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": err.Error()}})
+        return
+    }
+
+    c.JSON(http.StatusAccepted, openai.NewDeleteSessionResponse())
+}
+```
+
 ## 流式输出
 
-`WriteChatCompletionStream` 会输出 OpenAI-compatible SSE：
+`WriteChatCompletionStreamTo` 会输出 OpenAI-compatible SSE：
 
 ```text
 data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000,"model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}

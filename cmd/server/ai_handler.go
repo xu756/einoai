@@ -13,6 +13,7 @@ func (a *app) registerAISDK(r gin.IRouter) {
 	r.POST("/completions", a.aiCompletions)
 	r.POST("/sessions/:sessionId", a.createAIRun)
 	r.GET("/sessions/:sessionId", a.getAIRun)
+	r.DELETE("/sessions/:sessionId", a.deleteAISession)
 	r.POST("/sessions/:sessionId/runs/:run_id", a.subscribeAIEvents)
 	r.POST("/sessions/:sessionId/runs/:run_id/cancel", a.cancelAIRun)
 }
@@ -56,7 +57,8 @@ func (a *app) aiCompletions(c *gin.Context) {
 		return
 	}
 	defer stream.Close()
-	aisdk.WriteEventStream(c, stream)
+	aisdk.SetEventStreamHeaders(c.Writer.Header())
+	_ = aisdk.WriteEventStreamTo(c.Request.Context(), c.Writer, c.Writer.Flush, stream)
 }
 
 func (a *app) createAIRun(c *gin.Context) {
@@ -123,7 +125,16 @@ func (a *app) subscribeAIEvents(c *gin.Context) {
 		return
 	}
 	defer stream.Close()
-	aisdk.WriteEventStream(c, stream)
+	aisdk.SetEventStreamHeaders(c.Writer.Header())
+	_ = aisdk.WriteEventStreamTo(c.Request.Context(), c.Writer, c.Writer.Flush, stream)
+}
+
+func (a *app) deleteAISession(c *gin.Context) {
+	if err := a.svc.DeleteSession(c.Request.Context(), c.Param("sessionId")); err != nil {
+		writeAIError(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, aisdk.NewDeleteSessionResponse())
 }
 
 func (a *app) cancelAIRun(c *gin.Context) {

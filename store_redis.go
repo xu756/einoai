@@ -46,6 +46,10 @@ func activeMessagesKey(sessionID, runID string) string {
 	return fmt.Sprintf("chat:sessions:%s:runs:%s:active_messages", sessionID, runID)
 }
 
+func sessionKeysPattern(sessionID string) string {
+	return fmt.Sprintf("chat:sessions:%s:*", sessionID)
+}
+
 func (s *redisStore) initRun(ctx context.Context, run *RunInfo) error {
 	now := time.Now()
 	run.CreatedAt = now
@@ -205,6 +209,25 @@ func (s *redisStore) commitRunMessages(ctx context.Context, sessionID, runID str
 	}
 	_ = s.rdb.Del(ctx, activeMessagesKey(sessionID, runID)).Err()
 	return nil
+}
+
+func (s *redisStore) deleteSession(ctx context.Context, sessionID string) error {
+	var cursor uint64
+	for {
+		keys, nextCursor, err := s.rdb.Scan(ctx, cursor, sessionKeysPattern(sessionID), 100).Result()
+		if err != nil {
+			return err
+		}
+		if len(keys) > 0 {
+			if err := s.rdb.Del(ctx, keys...).Err(); err != nil {
+				return err
+			}
+		}
+		cursor = nextCursor
+		if cursor == 0 {
+			return nil
+		}
+	}
 }
 
 func (s *redisStore) getRunForEvents(ctx context.Context, sessionID, runID string) (*RunInfo, error) {

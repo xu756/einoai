@@ -1,14 +1,14 @@
 package aisdk
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 
 	"github.com/xu756/einoai"
-
-	"github.com/gin-gonic/gin"
 )
 
 type toolState struct {
@@ -24,84 +24,119 @@ type streamState struct {
 	toolCalls map[string]*toolState
 }
 
-// WriteEventStream writes einoai events as AI SDK Data Stream Protocol SSE.
-func WriteEventStream(c *gin.Context, stream einoai.EventStream) {
-	setStreamHeaders(c)
+// FlushFunc flushes buffered stream data to the client.
+type FlushFunc func()
+
+type eventStreamWriter struct {
+	writer io.Writer
+	flush  FlushFunc
+}
+
+// SetEventStreamHeaders sets AI SDK UI Message Stream headers on an HTTP header map.
+func SetEventStreamHeaders(header http.Header) {
+	header.Set("Content-Type", "text/event-stream; charset=utf-8")
+	header.Set("Cache-Control", "no-cache, no-transform")
+	header.Set("Connection", "keep-alive")
+	header.Set("X-Accel-Buffering", "no")
+	header.Set("x-vercel-ai-ui-message-stream", "v1")
+}
+
+// WriteEventStreamTo writes einoai events as AI SDK SSE to any writer.
+func WriteEventStreamTo(ctx context.Context, writer io.Writer, flush FlushFunc, stream einoai.EventStream) error {
+	out := eventStreamWriter{writer: writer, flush: flush}
 	state := newStreamState()
 
 	for {
-		ev, err := stream.Next(c.Request.Context())
+		ev, err := stream.Next(ctx)
 		if err == io.EOF {
-			writeDone(c)
-			return
+			return out.writeDone()
 		}
 		if err != nil {
-			writeStreamError(c, err)
-			return
+			_ = out.writeStreamError(err)
+			return err
 		}
 		if ev == nil {
 			continue
 		}
 		if !state.started {
-			writePart(c, ev.ID, map[string]any{"type": "start", "messageId": "msg_" + ev.RunID})
-			writePart(c, ev.ID, map[string]any{"type": "start-step"})
+			if err := out.writePart(ev.ID, map[string]any{"type": "start", "messageId": "msg_" + ev.RunID}); err != nil {
+				return err
+			}
+			if err := out.writePart(ev.ID, map[string]any{"type": "start-step"}); err != nil {
+				return err
+			}
 			state.started = true
 		}
-		if writeEvent(c, state, ev) {
-			writeDone(c)
-			return
+		done, err := writeEvent(out, state, ev)
+		if err != nil {
+			return err
+		}
+		if done {
+			return out.writeDone()
 		}
 	}
 }
 
-func writeEvent(c *gin.Context, state *streamState, ev *einoai.RunEvent) bool {
+func writeEvent(w eventStreamWriter, state *streamState, ev *einoai.RunEvent) (bool, error) {
 	switch ev.Type {
 	case einoai.EventTextStart:
 		data, _ := einoai.DecodeEventData[einoai.TextData](ev)
-		writePart(c, ev.ID, map[string]any{"type": "text-start", "id": data.ID})
+		return false, w.writePart(ev.ID, map[string]any{"type": "text-start", "id": data.ID})
 	case einoai.EventTextDelta:
 		data, _ := einoai.DecodeEventData[einoai.TextData](ev)
-		writePart(c, ev.ID, map[string]any{"type": "text-delta", "id": data.ID, "delta": data.Delta})
+		return false, w.writePart(ev.ID, map[string]any{"type": "text-delta", "id": data.ID, "delta": data.Delta})
 	case einoai.EventTextEnd:
 		data, _ := einoai.DecodeEventData[einoai.TextData](ev)
-		writePart(c, ev.ID, map[string]any{"type": "text-end", "id": data.ID})
+		return false, w.writePart(ev.ID, map[string]any{"type": "text-end", "id": data.ID})
 	case einoai.EventReasoningStart:
 		data, _ := einoai.DecodeEventData[einoai.ReasoningData](ev)
-		writePart(c, ev.ID, map[string]any{"type": "reasoning-start", "id": data.ID})
+		return false, w.writePart(ev.ID, map[string]any{"type": "reasoning-start", "id": data.ID})
 	case einoai.EventReasoningDelta:
 		data, _ := einoai.DecodeEventData[einoai.ReasoningData](ev)
-		writePart(c, ev.ID, map[string]any{"type": "reasoning-delta", "id": data.ID, "delta": data.Delta})
+		return false, w.writePart(ev.ID, map[string]any{"type": "reasoning-delta", "id": data.ID, "delta": data.Delta})
 	case einoai.EventReasoningEnd:
 		data, _ := einoai.DecodeEventData[einoai.ReasoningData](ev)
-		writePart(c, ev.ID, map[string]any{"type": "reasoning-end", "id": data.ID})
+		return false, w.writePart(ev.ID, map[string]any{"type": "reasoning-end", "id": data.ID})
 	case einoai.EventToolCall:
 		data, _ := einoai.DecodeEventData[einoai.ToolCallData](ev)
-		writeToolCall(c, state, ev.ID, data)
+		return false, writeToolCall(w, state, ev.ID, data)
 	case einoai.EventToolResult:
 		data, _ := einoai.DecodeEventData[einoai.ToolResultData](ev)
-		writeToolResult(c, state, ev.ID, data)
+		return false, writeToolResult(w, state, ev.ID, data)
 	case einoai.EventError:
 		data, _ := einoai.DecodeEventData[einoai.ErrorData](ev)
-		writePart(c, ev.ID, map[string]any{"type": "error", "errorText": data.Message})
+		return false, w.writePart(ev.ID, map[string]any{"type": "error", "errorText": data.Message})
 	case einoai.EventFinish:
 		data, _ := einoai.DecodeEventData[einoai.FinishData](ev)
 		if data.FinishReason == "tool_calls" {
-			writePendingToolsAvailable(c, state, ev.ID)
-			writePart(c, ev.ID, createFinishStepEvent())
-			writePart(c, ev.ID, map[string]any{"type": "start-step"})
-			return false
+			if err := writePendingToolsAvailable(w, state, ev.ID); err != nil {
+				return false, err
+			}
+			if err := w.writePart(ev.ID, createFinishStepEvent()); err != nil {
+				return false, err
+			}
+			if err := w.writePart(ev.ID, map[string]any{"type": "start-step"}); err != nil {
+				return false, err
+			}
+			return false, nil
 		}
-		writePart(c, ev.ID, createFinishStepEvent())
-		writePart(c, ev.ID, createMessageMetadataEvent())
-		writePart(c, ev.ID, createFinishEvent(data))
-		return true
+		if err := w.writePart(ev.ID, createFinishStepEvent()); err != nil {
+			return false, err
+		}
+		if err := w.writePart(ev.ID, createMessageMetadataEvent()); err != nil {
+			return false, err
+		}
+		if err := w.writePart(ev.ID, createFinishEvent(data)); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
-	return false
+	return false, nil
 }
 
-func writeToolCall(c *gin.Context, state *streamState, id string, data einoai.ToolCallData) {
+func writeToolCall(w eventStreamWriter, state *streamState, id string, data einoai.ToolCallData) error {
 	if data.ID == "" || data.Name == "" {
-		return
+		return nil
 	}
 	st := state.toolCalls[data.ID]
 	if st == nil {
@@ -109,33 +144,43 @@ func writeToolCall(c *gin.Context, state *streamState, id string, data einoai.To
 		state.toolCalls[data.ID] = st
 	}
 	if !st.started {
-		writePart(c, id, map[string]any{"type": "tool-input-start", "toolCallId": st.id, "toolName": st.name})
+		if err := w.writePart(id, map[string]any{"type": "tool-input-start", "toolCallId": st.id, "toolName": st.name}); err != nil {
+			return err
+		}
 		st.started = true
 	}
 	if data.Arguments != "" {
 		st.inputText += data.Arguments
-		writePart(c, id, map[string]any{"type": "tool-input-delta", "toolCallId": st.id, "inputTextDelta": data.Arguments})
+		if err := w.writePart(id, map[string]any{"type": "tool-input-delta", "toolCallId": st.id, "inputTextDelta": data.Arguments}); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
-func writeToolResult(c *gin.Context, state *streamState, id string, data einoai.ToolResultData) {
+func writeToolResult(w eventStreamWriter, state *streamState, id string, data einoai.ToolResultData) error {
 	st := state.toolCalls[data.ToolCallID]
 	if st == nil {
 		st = &toolState{id: data.ToolCallID, name: data.Name}
 		state.toolCalls[data.ToolCallID] = st
 	}
 	if !st.available {
-		writeToolAvailable(c, id, st)
-	}
-	writePart(c, id, map[string]any{"type": "tool-output-available", "toolCallId": st.id, "output": data.Content})
-}
-
-func writePendingToolsAvailable(c *gin.Context, state *streamState, id string) {
-	for _, st := range state.toolCalls {
-		if st.started && !st.available {
-			writeToolAvailable(c, id, st)
+		if err := writeToolAvailable(w, id, st); err != nil {
+			return err
 		}
 	}
+	return w.writePart(id, map[string]any{"type": "tool-output-available", "toolCallId": st.id, "output": data.Content})
+}
+
+func writePendingToolsAvailable(w eventStreamWriter, state *streamState, id string) error {
+	for _, st := range state.toolCalls {
+		if st.started && !st.available {
+			if err := writeToolAvailable(w, id, st); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func newStreamState() *streamState {
@@ -144,22 +189,27 @@ func newStreamState() *streamState {
 	}
 }
 
-func writeToolAvailable(c *gin.Context, id string, st *toolState) {
-	writePart(c, id, map[string]any{
+func writeToolAvailable(w eventStreamWriter, id string, st *toolState) error {
+	if err := w.writePart(id, map[string]any{
 		"type":       "tool-input-available",
 		"toolCallId": st.id,
 		"toolName":   st.name,
 		"input":      parseMaybeJSON(st.inputText),
-	})
+	}); err != nil {
+		return err
+	}
 	st.available = true
+	return nil
 }
 
-func writeStreamError(c *gin.Context, err error) {
+func (w eventStreamWriter) writeStreamError(err error) error {
 	if err == nil {
-		return
+		return nil
 	}
-	writePart(c, "", map[string]any{"type": "error", "errorText": err.Error()})
-	writeDone(c)
+	if writeErr := w.writePart("", map[string]any{"type": "error", "errorText": err.Error()}); writeErr != nil {
+		return writeErr
+	}
+	return w.writeDone()
 }
 
 func createFinishEvent(data einoai.FinishData) map[string]any {
@@ -222,29 +272,35 @@ func normalizeFinishReason(reason string) string {
 	}
 }
 
-func setStreamHeaders(c *gin.Context) {
-	c.Writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-	c.Writer.Header().Set("Cache-Control", "no-cache, no-transform")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("X-Accel-Buffering", "no")
-	c.Writer.Header().Set("x-vercel-ai-ui-message-stream", "v1")
-}
-
-func writePart(c *gin.Context, id string, part map[string]any) {
+func (w eventStreamWriter) writePart(id string, part map[string]any) error {
 	b, err := json.Marshal(part)
 	if err != nil {
-		return
+		return err
 	}
 	if id != "" {
-		_, _ = fmt.Fprintf(c.Writer, "id: %s\n", id)
+		if _, err := fmt.Fprintf(w.writer, "id: %s\n", id); err != nil {
+			return err
+		}
 	}
-	_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", b)
-	c.Writer.Flush()
+	if _, err := fmt.Fprintf(w.writer, "data: %s\n\n", b); err != nil {
+		return err
+	}
+	w.flushNow()
+	return nil
 }
 
-func writeDone(c *gin.Context) {
-	_, _ = fmt.Fprint(c.Writer, "data: [DONE]\n\n")
-	c.Writer.Flush()
+func (w eventStreamWriter) writeDone() error {
+	if _, err := fmt.Fprint(w.writer, "data: [DONE]\n\n"); err != nil {
+		return err
+	}
+	w.flushNow()
+	return nil
+}
+
+func (w eventStreamWriter) flushNow() {
+	if w.flush != nil {
+		w.flush()
+	}
 }
 
 func parseMaybeJSON(s string) any {

@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"time"
 
 	"github.com/xu756/einoai"
 
 	"github.com/cloudwego/eino/schema"
-	"github.com/gin-gonic/gin"
 )
 
 type chatCompletionChunk struct {
@@ -72,28 +72,48 @@ type streamState struct {
 	toolCalls    map[string]bool
 }
 
-// WriteChatCompletionStream writes einoai events as OpenAI-compatible SSE chunks.
-func WriteChatCompletionStream(c *gin.Context, req ChatCompletionsRequest, stream einoai.EventStream) {
-	setStreamHeaders(c)
+// FlushFunc flushes buffered stream data to the client.
+type FlushFunc func()
+
+type chatCompletionStreamWriter struct {
+	writer io.Writer
+	flush  FlushFunc
+}
+
+// SetChatCompletionStreamHeaders sets OpenAI-compatible SSE headers.
+func SetChatCompletionStreamHeaders(header http.Header) {
+	header.Set("Content-Type", "text/event-stream; charset=utf-8")
+	header.Set("Cache-Control", "no-cache, no-transform")
+	header.Set("Connection", "keep-alive")
+	header.Set("X-Accel-Buffering", "no")
+}
+
+// WriteChatCompletionStreamTo writes OpenAI-compatible SSE chunks to any writer.
+func WriteChatCompletionStreamTo(ctx context.Context, writer io.Writer, flush FlushFunc, req ChatCompletionsRequest, stream einoai.EventStream) error {
+	out := chatCompletionStreamWriter{writer: writer, flush: flush}
 	state := newStreamState(req)
-	writeChunk(c, "", state.chunk([]choice{{Index: 0, Delta: delta{Role: "assistant"}, FinishReason: nil}}, nil))
+	if err := out.writeChunk("", state.chunk([]choice{{Index: 0, Delta: delta{Role: "assistant"}, FinishReason: nil}}, nil)); err != nil {
+		return err
+	}
 
 	for {
-		ev, err := stream.Next(c.Request.Context())
+		ev, err := stream.Next(ctx)
 		if err == io.EOF {
-			writeDone(c)
-			return
+			return out.writeDone()
 		}
 		if err != nil {
-			writeStreamError(c, err)
-			return
+			_ = out.writeStreamError(err)
+			return err
 		}
 		if ev == nil {
 			continue
 		}
-		if writeEvent(c, state, ev) {
-			writeDone(c)
-			return
+		done, err := writeEvent(out, state, ev)
+		if err != nil {
+			return err
+		}
+		if done {
+			return out.writeDone()
 		}
 	}
 }
@@ -207,7 +227,7 @@ func CollectChatCompletion(ctx context.Context, req ChatCompletionsRequest, stre
 	}, nil
 }
 
-func writeEvent(c *gin.Context, state *streamState, ev *einoai.RunEvent) bool {
+func writeEvent(w chatCompletionStreamWriter, state *streamState, ev *einoai.RunEvent) (bool, error) {
 	d := delta{}
 	var finishReason any
 
@@ -222,27 +242,35 @@ func writeEvent(c *gin.Context, state *streamState, ev *einoai.RunEvent) bool {
 		data, _ := einoai.DecodeEventData[einoai.ToolCallData](ev)
 		d.ToolCalls = []toolCallDelta{state.toolCallDelta(data)}
 	case einoai.EventToolResult:
-		return false
+		return false, nil
 	case einoai.EventFinish:
 		data, _ := einoai.DecodeEventData[einoai.FinishData](ev)
 		if data.FinishReason != "" {
 			finishReason = normalizeFinishReason(data.FinishReason)
 		}
 		if finishReason != "tool_calls" && state.includeUsage {
-			writeChunk(c, ev.ID, state.chunk([]choice{{Index: 0, Delta: d, FinishReason: finishReason}}, nil))
-			writeChunk(c, "", state.chunk([]choice{}, convertUsage(data.Usage)))
-			return true
+			if err := w.writeChunk(ev.ID, state.chunk([]choice{{Index: 0, Delta: d, FinishReason: finishReason}}, nil)); err != nil {
+				return false, err
+			}
+			if err := w.writeChunk("", state.chunk([]choice{}, convertUsage(data.Usage))); err != nil {
+				return false, err
+			}
+			return true, nil
 		}
 	case einoai.EventError:
 		data, _ := einoai.DecodeEventData[einoai.ErrorData](ev)
-		writeErrorData(c, data.Message)
-		return true
+		if err := w.writeErrorData(data.Message); err != nil {
+			return false, err
+		}
+		return true, nil
 	default:
-		return false
+		return false, nil
 	}
 
-	writeChunk(c, ev.ID, state.chunk([]choice{{Index: 0, Delta: d, FinishReason: finishReason}}, nil))
-	return ev.Type == einoai.EventFinish && finishReason != "tool_calls"
+	if err := w.writeChunk(ev.ID, state.chunk([]choice{{Index: 0, Delta: d, FinishReason: finishReason}}, nil)); err != nil {
+		return false, err
+	}
+	return ev.Type == einoai.EventFinish && finishReason != "tool_calls", nil
 }
 
 func (s *streamState) toolCallDelta(data einoai.ToolCallData) toolCallDelta {
@@ -289,40 +317,53 @@ func convertUsage(u *schema.TokenUsage) *usage {
 	}
 }
 
-func setStreamHeaders(c *gin.Context) {
-	c.Writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-	c.Writer.Header().Set("Cache-Control", "no-cache, no-transform")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("X-Accel-Buffering", "no")
-}
-
-func writeChunk(c *gin.Context, eventID string, chunk chatCompletionChunk) {
+func (w chatCompletionStreamWriter) writeChunk(eventID string, chunk chatCompletionChunk) error {
 	b, err := json.Marshal(chunk)
 	if err != nil {
-		return
+		return err
 	}
 	if eventID != "" {
-		_, _ = fmt.Fprintf(c.Writer, "id: %s\n", eventID)
+		if _, err := fmt.Fprintf(w.writer, "id: %s\n", eventID); err != nil {
+			return err
+		}
 	}
-	_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", b)
-	c.Writer.Flush()
+	if _, err := fmt.Fprintf(w.writer, "data: %s\n\n", b); err != nil {
+		return err
+	}
+	w.flushNow()
+	return nil
 }
 
-func writeDone(c *gin.Context) {
-	_, _ = fmt.Fprint(c.Writer, "data: [DONE]\n\n")
-	c.Writer.Flush()
+func (w chatCompletionStreamWriter) writeDone() error {
+	if _, err := fmt.Fprint(w.writer, "data: [DONE]\n\n"); err != nil {
+		return err
+	}
+	w.flushNow()
+	return nil
 }
 
-func writeErrorData(c *gin.Context, message string) {
+func (w chatCompletionStreamWriter) writeErrorData(message string) error {
 	errObj := map[string]any{"error": map[string]any{"message": message, "type": "server_error"}}
 	b, _ := json.Marshal(errObj)
-	_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", b)
+	if _, err := fmt.Fprintf(w.writer, "data: %s\n\n", b); err != nil {
+		return err
+	}
+	w.flushNow()
+	return nil
 }
 
-func writeStreamError(c *gin.Context, err error) {
+func (w chatCompletionStreamWriter) writeStreamError(err error) error {
 	if err == nil {
-		return
+		return nil
 	}
-	writeErrorData(c, err.Error())
-	writeDone(c)
+	if writeErr := w.writeErrorData(err.Error()); writeErr != nil {
+		return writeErr
+	}
+	return w.writeDone()
+}
+
+func (w chatCompletionStreamWriter) flushNow() {
+	if w.flush != nil {
+		w.flush()
+	}
 }

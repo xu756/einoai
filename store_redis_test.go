@@ -115,3 +115,56 @@ func TestRedisStoreCanDisableTTL(t *testing.T) {
 		t.Fatalf("expected messages ttl disabled, got %s", ttl)
 	}
 }
+
+func TestRedisStoreDeleteSessionRemovesSessionKeys(t *testing.T) {
+	store, cleanup, srv := newTestRedisStoreWithServer(t, DefaultRedisTTL)
+	defer cleanup()
+
+	ctx := context.Background()
+	run := &RunInfo{SessionID: "s1", RunID: "r1", Status: RunStatusRunning}
+	if err := store.initRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.setActiveMessages(ctx, "s1", "r1", []*schema.Message{
+		{Role: schema.User, Content: "active"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.replaceSessionMessages(ctx, "s1", []*schema.Message{
+		{Role: schema.User, Content: "history"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.appendEvent(ctx, RunEvent{
+		SessionID: "s1",
+		RunID:     "r1",
+		Type:      EventTextDelta,
+		Data:      TextData{ID: "text_1", Delta: "hello"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.replaceSessionMessages(ctx, "s2", []*schema.Message{
+		{Role: schema.User, Content: "other"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.deleteSession(ctx, "s1"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, key := range []string{
+		currentRunKey("s1"),
+		runMetaKey("s1", "r1"),
+		runEventsKey("s1", "r1"),
+		activeMessagesKey("s1", "r1"),
+		sessionMessagesKey("s1"),
+	} {
+		if srv.Exists(key) {
+			t.Fatalf("expected key %s to be deleted", key)
+		}
+	}
+	if !srv.Exists(sessionMessagesKey("s2")) {
+		t.Fatal("expected other session history to remain")
+	}
+}

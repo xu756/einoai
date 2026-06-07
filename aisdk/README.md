@@ -2,7 +2,7 @@
 
 `github.com/xu756/einoai/aisdk` 是 AI SDK / assistant-ui 协议适配包。它负责把前端 UIMessage 请求转换成 Eino `[]*schema.Message`，并把核心 `einoai.RunEvent` 输出为 AI SDK UI Message Stream SSE。
 
-这个包不注册路由。普通请求解析和响应构造不依赖 Gin；只有 `WriteEventStream` 这个流式写出函数接收 `*gin.Context`。
+这个包不注册路由，也不依赖 Gin。普通请求解析、响应构造和 SSE 写出都通过框架无关函数完成；示例服务里的 Gin handler 只是自己把 `gin.Context` 的 writer 接进来。
 
 ## 职责
 
@@ -114,7 +114,9 @@ resp := aisdk.NewRunResponse(run, schemaMessages)
 | `NewCreateRunResponse(run)` | 构造创建 run JSON 响应结构体 |
 | `NewRunResponse(run, messages)` | 构造查询 run JSON 响应结构体，并转换 history |
 | `NewCancelResponse()` | 构造取消 run JSON 响应结构体 |
-| `WriteEventStream(c, stream)` | 写 AI SDK UI Message Stream SSE |
+| `NewDeleteSessionResponse()` | 构造删除 session JSON 响应结构体 |
+| `SetEventStreamHeaders(header)` | 设置 AI SDK SSE 响应头 |
+| `WriteEventStreamTo(ctx, writer, flush, stream)` | 写 AI SDK SSE 到任意 `io.Writer` |
 
 ## 组合示例
 
@@ -196,9 +198,25 @@ func (h *Handler) RunAIEvents(c *gin.Context) {
     }
     defer stream.Close()
 
-    aisdk.WriteEventStream(c, stream)
+    aisdk.SetEventStreamHeaders(c.Writer.Header())
+    _ = aisdk.WriteEventStreamTo(c.Request.Context(), c.Writer, c.Writer.Flush, stream)
 }
 ```
+
+非 Gin 框架也是同一组通用 writer：
+
+```go
+aisdk.SetEventStreamHeaders(header)
+
+err := aisdk.WriteEventStreamTo(
+    ctx,
+    writer,
+    flush,
+    stream,
+)
+```
+
+`writer` 只需要实现 `io.Writer`，`flush` 可以为 `nil`。Hertz 等框架可以把自己的 stream writer 接到这里。
 
 取消 run：
 
@@ -214,9 +232,23 @@ func (h *Handler) CancelAIRun(c *gin.Context) {
 }
 ```
 
+删除 session：
+
+```go
+func (h *Handler) DeleteAISession(c *gin.Context) {
+    err := h.AIService.DeleteSession(c.Request.Context(), c.Param("sessionId"))
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        return
+    }
+
+    c.JSON(http.StatusAccepted, aisdk.NewDeleteSessionResponse())
+}
+```
+
 ## SSE 输出要点
 
-`WriteEventStream` 会设置：
+`SetEventStreamHeaders` 会设置：
 
 ```text
 Content-Type: text/event-stream; charset=utf-8

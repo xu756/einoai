@@ -1,35 +1,40 @@
 package aisdk
 
 import (
-	"net/http/httptest"
+	"bytes"
+	"context"
+	"io"
 	"strings"
 	"testing"
 
 	"github.com/xu756/einoai"
-
-	"github.com/gin-gonic/gin"
 )
 
 func TestWriteToolCallWritesStandardToolInputEvents(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
+	var buf bytes.Buffer
 	state := newStreamState()
+	writer := eventStreamWriter{writer: &buf}
 
-	writeToolCall(c, state, "1-0", einoai.ToolCallData{
+	if err := writeToolCall(writer, state, "1-0", einoai.ToolCallData{
 		ID:    "call_00_P6ma2c1021vGwXNjT4gp7549",
 		Name:  "get_weather",
 		Index: 0,
-	})
-	writeToolCall(c, state, "1-1", einoai.ToolCallData{
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeToolCall(writer, state, "1-1", einoai.ToolCallData{
 		ID:        "call_00_P6ma2c1021vGwXNjT4gp7549",
 		Name:      "get_weather",
 		Arguments: `{"location":"北京"}`,
 		Index:     0,
-	})
-	writePendingToolsAvailable(c, state, "1-2")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePendingToolsAvailable(writer, state, "1-2"); err != nil {
+		t.Fatal(err)
+	}
 
-	body := rec.Body.String()
+	body := buf.String()
 	if strings.Count(body, `"type":"tool-input-available"`) != 1 {
 		t.Fatalf("expected one tool-input-available event, got:\n%s", body)
 	}
@@ -45,4 +50,55 @@ func TestWriteToolCallWritesStandardToolInputEvents(t *testing.T) {
 	if !strings.Contains(body, `"input":{"location":"北京"}`) {
 		t.Fatalf("expected parsed tool input, got:\n%s", body)
 	}
+}
+
+func TestWriteEventStreamToWritesWithoutGin(t *testing.T) {
+	var buf bytes.Buffer
+	stream := &aisdkSliceEventStream{events: []*einoai.RunEvent{
+		{
+			ID:    "1-0",
+			RunID: "run_1",
+			Type:  einoai.EventTextDelta,
+			Data:  einoai.TextData{ID: "text_1", Delta: "hello"},
+		},
+		{
+			ID:    "1-1",
+			RunID: "run_1",
+			Type:  einoai.EventFinish,
+			Data:  einoai.FinishData{FinishReason: "stop"},
+		},
+	}}
+
+	if err := WriteEventStreamTo(context.Background(), &buf, nil, stream); err != nil {
+		t.Fatal(err)
+	}
+
+	body := buf.String()
+	if !strings.Contains(body, `data: {"messageId":"msg_run_1","type":"start"}`) {
+		t.Fatalf("expected start event, got:\n%s", body)
+	}
+	if !strings.Contains(body, `"delta":"hello"`) {
+		t.Fatalf("expected text delta, got:\n%s", body)
+	}
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("expected done event, got:\n%s", body)
+	}
+}
+
+type aisdkSliceEventStream struct {
+	events []*einoai.RunEvent
+	index  int
+}
+
+func (s *aisdkSliceEventStream) Next(context.Context) (*einoai.RunEvent, error) {
+	if s.index >= len(s.events) {
+		return nil, io.EOF
+	}
+	ev := s.events[s.index]
+	s.index++
+	return ev, nil
+}
+
+func (s *aisdkSliceEventStream) Close() error {
+	return nil
 }

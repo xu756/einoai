@@ -13,6 +13,7 @@ func (a *app) registerOpenAI(r gin.IRouter) {
 	r.POST("/chat/completions", a.openAICompletions)
 	r.POST("/sessions/:sessionId", a.createOpenAIRun)
 	r.GET("/sessions/:sessionId", a.getOpenAIRun)
+	r.DELETE("/sessions/:sessionId", a.deleteOpenAISession)
 	r.POST("/sessions/:sessionId/runs/:run_id", a.subscribeOpenAIEvents)
 	r.POST("/sessions/:sessionId/runs/:run_id/cancel", a.cancelOpenAIRun)
 }
@@ -58,7 +59,8 @@ func (a *app) openAICompletions(c *gin.Context) {
 	defer stream.Close()
 
 	if req.Stream {
-		openai.WriteChatCompletionStream(c, req, stream)
+		openai.SetChatCompletionStreamHeaders(c.Writer.Header())
+		_ = openai.WriteChatCompletionStreamTo(c.Request.Context(), c.Writer, c.Writer.Flush, req, stream)
 		return
 	}
 	body, err := openai.CollectChatCompletion(c.Request.Context(), req, stream)
@@ -136,7 +138,16 @@ func (a *app) subscribeOpenAIEvents(c *gin.Context) {
 		Model:  c.Query("model"),
 		Stream: true,
 	}
-	openai.WriteChatCompletionStream(c, req, stream)
+	openai.SetChatCompletionStreamHeaders(c.Writer.Header())
+	_ = openai.WriteChatCompletionStreamTo(c.Request.Context(), c.Writer, c.Writer.Flush, req, stream)
+}
+
+func (a *app) deleteOpenAISession(c *gin.Context) {
+	if err := a.svc.DeleteSession(c.Request.Context(), c.Param("sessionId")); err != nil {
+		writeOpenAIError(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, openai.NewDeleteSessionResponse())
 }
 
 func (a *app) cancelOpenAIRun(c *gin.Context) {

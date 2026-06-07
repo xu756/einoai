@@ -23,6 +23,11 @@ type CancelResponse struct {
 	OK bool `json:"ok"`
 }
 
+// DeleteSessionResponse is the default OpenAI-compatible delete-session response shape.
+type DeleteSessionResponse struct {
+	OK bool `json:"ok"`
+}
+
 // NewCreateRunResponse converts a run into a response struct.
 func NewCreateRunResponse(run *einoai.RunInfo) CreateRunResponse {
 	if run == nil {
@@ -46,4 +51,9 @@ func NewRunResponse(run *einoai.RunInfo, messages []*schema.Message) RunResponse
 // NewCancelResponse returns a successful cancel response struct.
 func NewCancelResponse() CancelResponse {
 	return CancelResponse{OK: true}
+}
+
+// NewDeleteSessionResponse returns a successful delete-session response struct.
+func NewDeleteSessionResponse() DeleteSessionResponse {
+	return DeleteSessionResponse{OK: true}
 }

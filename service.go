@@ -15,16 +15,20 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+var errSessionDeleted = errors.New("session deleted")
+
 type service struct {
-	store      *redisStore
-	runMu      sync.Mutex
-	runCancels map[string]context.CancelFunc
+	store       *redisStore
+	runMu       sync.Mutex
+	runCancels  map[string]context.CancelFunc
+	deletedRuns map[string]struct{}
 }
 
 func newService(db *redis.Client, opts serviceOptions) *service {
 	return &service{
-		store:      newRedisStore(db, opts.redisTTL),
-		runCancels: make(map[string]context.CancelFunc),
+		store:       newRedisStore(db, opts.redisTTL),
+		runCancels:  make(map[string]context.CancelFunc),
+		deletedRuns: make(map[string]struct{}),
 	}
 }
 
@@ -123,6 +127,21 @@ func (s *service) GetMessages(ctx context.Context, sessionID string) ([]*schema.
 	return active, nil
 }
 
+func (s *service) DeleteSession(ctx context.Context, sessionID string) error {
+	if sessionID == "" {
+		return errors.New("sessionID is required")
+	}
+	run, err := s.store.getCurrentRun(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if run != nil && !isTerminalRunStatus(run.Status) {
+		s.markRunDeleted(run.RunID)
+		_ = s.cancelActiveRun(run.RunID)
+	}
+	return s.store.deleteSession(ctx, sessionID)
+}
+
 func (s *service) CancelRun(ctx context.Context, sessionID string, runID string) error {
 	if sessionID == "" {
 		return errors.New("sessionID is required")
@@ -181,10 +200,20 @@ func (s *service) executeRun(ctx context.Context, cancel context.CancelFunc, ses
 	defer cancel()
 	defer s.unregisterRunCancel(runID)
 
+	if s.isRunDeleted(runID) {
+		return
+	}
 	if err := s.store.setRunStatus(context.Background(), sessionID, runID, RunStatusRunning, ""); err != nil {
 		return
 	}
-	_, _ = s.appendEvent(context.Background(), sessionID, runID, EventRunStarted, nil)
+	if s.isRunDeleted(runID) {
+		_ = s.store.deleteSession(context.Background(), sessionID)
+		return
+	}
+	if _, err := s.appendEvent(context.Background(), sessionID, runID, EventRunStarted, nil); errors.Is(err, errSessionDeleted) {
+		_ = s.store.deleteSession(context.Background(), sessionID)
+		return
+	}
 
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent:           agent,
@@ -194,7 +223,15 @@ func (s *service) executeRun(ctx context.Context, cancel context.CancelFunc, ses
 	state := newRunEventBuilder(s, sessionID, runID)
 
 	if err := s.streamAgentEvents(ctx, iter, state); err != nil {
+		if errors.Is(err, errSessionDeleted) {
+			_ = s.store.deleteSession(context.Background(), sessionID)
+			return
+		}
 		if errors.Is(err, context.Canceled) {
+			if s.isRunDeleted(runID) {
+				_ = s.store.deleteSession(context.Background(), sessionID)
+				return
+			}
 			_ = state.closeOpenBlocks(context.Background())
 			_ = s.appendFinish(context.Background(), sessionID, runID, "cancelled", nil)
 			_ = s.store.commitRunMessages(context.Background(), sessionID, runID, nil)
@@ -211,8 +248,16 @@ func (s *service) executeRun(ctx context.Context, cancel context.CancelFunc, ses
 		return
 	}
 
+	if s.isRunDeleted(runID) {
+		_ = s.store.deleteSession(context.Background(), sessionID)
+		return
+	}
 	if !state.finished {
 		_ = state.writeFinish(context.Background(), "stop", state.usage)
+	}
+	if s.isRunDeleted(runID) {
+		_ = s.store.deleteSession(context.Background(), sessionID)
+		return
 	}
 	_ = s.store.commitRunMessages(context.Background(), sessionID, runID, state.outputMessages)
 	_ = s.store.setRunStatus(context.Background(), sessionID, runID, RunStatusCompleted, "")
@@ -267,6 +312,9 @@ func (s *service) streamAgentEvents(ctx context.Context, iter *adk.AsyncIterator
 }
 
 func (s *service) appendEvent(ctx context.Context, sessionID, runID string, typ EventType, data any) (*RunEvent, error) {
+	if s.isRunDeleted(runID) {
+		return nil, errSessionDeleted
+	}
 	return s.store.appendEvent(ctx, RunEvent{
 		SessionID: sessionID,
 		RunID:     runID,
@@ -286,6 +334,7 @@ func (s *service) appendFinish(ctx context.Context, sessionID, runID string, rea
 func (s *service) registerRunCancel(runID string, cancel context.CancelFunc) {
 	s.runMu.Lock()
 	defer s.runMu.Unlock()
+	delete(s.deletedRuns, runID)
 	s.runCancels[runID] = cancel
 }
 
@@ -293,6 +342,7 @@ func (s *service) unregisterRunCancel(runID string) {
 	s.runMu.Lock()
 	defer s.runMu.Unlock()
 	delete(s.runCancels, runID)
+	delete(s.deletedRuns, runID)
 }
 
 func (s *service) cancelActiveRun(runID string) bool {
@@ -304,6 +354,22 @@ func (s *service) cancelActiveRun(runID string) bool {
 	}
 	cancel()
 	return true
+}
+
+func (s *service) markRunDeleted(runID string) {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	if s.deletedRuns == nil {
+		s.deletedRuns = make(map[string]struct{})
+	}
+	s.deletedRuns[runID] = struct{}{}
+}
+
+func (s *service) isRunDeleted(runID string) bool {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	_, ok := s.deletedRuns[runID]
+	return ok
 }
 
 func newRunID() string {
