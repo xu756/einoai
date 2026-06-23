@@ -260,7 +260,7 @@ data: [DONE]
 
 - `finish-step` 当前只输出 `type`，不携带 `finishReason`。
 - `message-metadata.messageMetadata.modelId` 来自 `MODEL_NAME` 环境变量。
-- usage 只在最终 `finish.messageMetadata.custom.usage` 中返回。
+- usage 会在最终 `finish.messageMetadata.custom.usage` 中返回；历史消息回放时，assistant message 的 `metadata.custom.usage` 也会保留同样的结构。
 - AI SDK finish reason 会把核心事件中的 `tool_calls`、`content_filter` 转成 `tool-calls`、`content-filter`。
 - 如果是工具调用中间步骤，会先输出 `finish-step`，然后输出新的 `start-step` 继续下一步。
 

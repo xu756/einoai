@@ -56,7 +56,9 @@ func (a *app) aiCompletions(c *gin.Context) {
 		writeAIError(c, err)
 		return
 	}
-	defer stream.Close()
+	defer func() {
+		_ = stream.Close()
+	}()
 	aisdk.SetEventStreamHeaders(c.Writer.Header())
 	_ = aisdk.WriteEventStreamTo(c.Request.Context(), c.Writer, c.Writer.Flush, stream)
 }
@@ -124,7 +126,9 @@ func (a *app) subscribeAIEvents(c *gin.Context) {
 		writeAIError(c, err)
 		return
 	}
-	defer stream.Close()
+	defer func() {
+		_ = stream.Close()
+	}()
 	aisdk.SetEventStreamHeaders(c.Writer.Header())
 	_ = aisdk.WriteEventStreamTo(c.Request.Context(), c.Writer, c.Writer.Flush, stream)
 }

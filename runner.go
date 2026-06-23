@@ -280,6 +280,12 @@ func (b *runEventBuilder) commitAssistantMessage() error {
 	if msg.Role == "" {
 		msg.Role = schema.Assistant
 	}
+	if b.usage != nil {
+		if msg.ResponseMeta == nil {
+			msg.ResponseMeta = &schema.ResponseMeta{}
+		}
+		msg.ResponseMeta.Usage = b.usage
+	}
 	b.outputMessages = append(b.outputMessages, msg)
 	b.assistantChunks = nil
 	return nil

@@ -288,7 +288,7 @@ data: {"type":"tool-output-available","toolCallId":"call_001","output":{"tempera
 
 - `toolName` 和 `toolCallId` 来自 Eino tool call，不生成 `toolName: "tool"` 之类的兜底值。
 - `finish-step` 当前只输出 `type`。
-- usage 只在最终 `finish.messageMetadata.custom.usage` 中返回。
+- usage 会在最终 `finish.messageMetadata.custom.usage` 中返回；历史消息回放时，assistant message 的 `metadata.custom.usage` 也会保留同样的结构。
 - `tool_calls`、`content_filter` 会输出为 AI SDK 的 `tool-calls`、`content-filter`。
 - 当前订阅直接订阅指定 `runID`，不读取 `Last-Event-ID`。
 

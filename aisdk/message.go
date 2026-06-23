@@ -126,6 +126,7 @@ func FromSchemaMessages(messages []*schema.Message) []Message {
 			continue
 		}
 		if msg.Role == schema.Assistant && shouldAppendAssistantMessage(out, msg) {
+			mergeUsageMetadata(&out[len(out)-1], msg)
 			appendAssistantParts(&out[len(out)-1], msg)
 			continue
 		}
@@ -148,6 +149,7 @@ func fromSchemaMessage(msg *schema.Message, index int) Message {
 		Role:     fromSchemaRole(msg.Role),
 		Metadata: uiMetadata(msg),
 	}
+	mergeUsageMetadata(&m, msg)
 	switch msg.Role {
 	case schema.Assistant:
 		appendAssistantParts(&m, msg)
@@ -239,6 +241,39 @@ func uiMetadata(msg *schema.Message) map[string]any {
 		return nil
 	}
 	return metadata
+}
+
+func mergeUsageMetadata(m *Message, msg *schema.Message) {
+	if msg.ResponseMeta == nil || msg.ResponseMeta.Usage == nil {
+		return
+	}
+	if m.Metadata == nil {
+		m.Metadata = make(map[string]any)
+	}
+	custom, ok := m.Metadata["custom"].(map[string]any)
+	if !ok {
+		custom = make(map[string]any)
+		m.Metadata["custom"] = custom
+	}
+	custom["usage"] = usageMetadata(msg.ResponseMeta.Usage)
+}
+
+func usageMetadata(usage *schema.TokenUsage) map[string]any {
+	return map[string]any{
+		"inputTokens":       usage.PromptTokens,
+		"outputTokens":      usage.CompletionTokens,
+		"totalTokens":       usage.TotalTokens,
+		"cachedInputTokens": usage.PromptTokenDetails.CachedTokens,
+		"inputTokenDetails": map[string]any{
+			"cacheReadTokens": usage.PromptTokenDetails.CachedTokens,
+			"noCacheTokens":   usage.PromptTokens - usage.PromptTokenDetails.CachedTokens,
+		},
+		"outputTokenDetails": map[string]any{
+			"textTokens":      usage.CompletionTokens - usage.CompletionTokensDetails.ReasoningTokens,
+			"reasoningTokens": usage.CompletionTokensDetails.ReasoningTokens,
+		},
+		"reasoningTokens": usage.CompletionTokensDetails.ReasoningTokens,
+	}
 }
 
 func hasAssistantContent(msg *schema.Message) bool {

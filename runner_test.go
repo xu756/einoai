@@ -83,3 +83,53 @@ func TestRunEventBuilderConvertsToolCallChunksToCompleteEvents(t *testing.T) {
 		t.Fatalf("unexpected tool arguments: %#v", toolEvents[1])
 	}
 }
+
+func TestRunEventBuilderPreservesUsageOnCommittedAssistantMessage(t *testing.T) {
+	store, cleanup := newTestRedisStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	run := &RunInfo{SessionID: "s1", RunID: "r1", Status: RunStatusRunning}
+	if err := store.initRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+
+	usage := &schema.TokenUsage{
+		PromptTokens:     10,
+		CompletionTokens: 5,
+		TotalTokens:      15,
+	}
+	builder := newRunEventBuilder(&service{store: store}, "s1", "r1")
+	if err := builder.writeMessage(ctx, &schema.Message{
+		Role:    schema.Assistant,
+		Content: "hello",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := builder.writeMessage(ctx, &schema.Message{
+		Role: schema.Assistant,
+		ResponseMeta: &schema.ResponseMeta{
+			FinishReason: "stop",
+			Usage:        usage,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.commitRunMessages(ctx, "s1", "r1", builder.outputMessages); err != nil {
+		t.Fatal(err)
+	}
+
+	messages, err := store.getSessionMessages(ctx, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("expected committed assistant message, got %#v", messages)
+	}
+	if messages[0].ResponseMeta == nil || messages[0].ResponseMeta.Usage == nil {
+		t.Fatalf("expected committed assistant message to preserve usage, got %#v", messages[0].ResponseMeta)
+	}
+	if messages[0].ResponseMeta.Usage.TotalTokens != usage.TotalTokens {
+		t.Fatalf("expected total tokens %d, got %#v", usage.TotalTokens, messages[0].ResponseMeta.Usage)
+	}
+}

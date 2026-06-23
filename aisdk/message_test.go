@@ -157,3 +157,55 @@ func TestFromSchemaMessagesBuildsUIMessageParts(t *testing.T) {
 		t.Fatalf("unexpected final assistant step: %#v", assistant.Parts[4:])
 	}
 }
+
+func TestFromSchemaMessagesAddsUsageToAssistantMetadata(t *testing.T) {
+	uiMessages := FromSchemaMessages([]*schema.Message{
+		{
+			Role:    schema.Assistant,
+			Content: "我来查天气",
+			Extra: map[string]any{
+				uiIDExtraKey: "assistant_1",
+				uiMetadataExtraKey: map[string]any{
+					"custom": map[string]any{
+						"traceId": "trace_1",
+					},
+				},
+			},
+		},
+		{
+			Role:    schema.Assistant,
+			Content: "郑州晴天",
+			ResponseMeta: &schema.ResponseMeta{
+				Usage: &schema.TokenUsage{
+					PromptTokens:     10,
+					CompletionTokens: 5,
+					TotalTokens:      15,
+					PromptTokenDetails: schema.PromptTokenDetails{
+						CachedTokens: 3,
+					},
+					CompletionTokensDetails: schema.CompletionTokensDetails{
+						ReasoningTokens: 2,
+					},
+				},
+			},
+		},
+	})
+
+	if len(uiMessages) != 1 {
+		t.Fatalf("expected one merged assistant UI message, got %#v", uiMessages)
+	}
+	custom, ok := uiMessages[0].Metadata["custom"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected custom metadata, got %#v", uiMessages[0].Metadata)
+	}
+	if custom["traceId"] != "trace_1" {
+		t.Fatalf("expected existing custom metadata to be preserved, got %#v", custom)
+	}
+	usage, ok := custom["usage"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected usage metadata, got %#v", custom)
+	}
+	if usage["inputTokens"] != 10 || usage["outputTokens"] != 5 || usage["totalTokens"] != 15 {
+		t.Fatalf("unexpected usage metadata: %#v", usage)
+	}
+}

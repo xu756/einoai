@@ -56,7 +56,9 @@ func (a *app) openAICompletions(c *gin.Context) {
 		writeOpenAIError(c, err)
 		return
 	}
-	defer stream.Close()
+	defer func() {
+		_ = stream.Close()
+	}()
 
 	if req.Stream {
 		openai.SetChatCompletionStreamHeaders(c.Writer.Header())
@@ -132,7 +134,9 @@ func (a *app) subscribeOpenAIEvents(c *gin.Context) {
 		writeOpenAIError(c, err)
 		return
 	}
-	defer stream.Close()
+	defer func() {
+		_ = stream.Close()
+	}()
 
 	req := openai.ChatCompletionsRequest{
 		Model:  c.Query("model"),

@@ -244,21 +244,7 @@ func createMessageMetadataEvent() map[string]any {
 }
 
 func createUsage(data einoai.FinishData) map[string]any {
-	return map[string]any{
-		"inputTokens":       data.Usage.PromptTokens,
-		"outputTokens":      data.Usage.CompletionTokens,
-		"totalTokens":       data.Usage.TotalTokens,
-		"cachedInputTokens": data.Usage.PromptTokenDetails.CachedTokens,
-		"inputTokenDetails": map[string]any{
-			"cacheReadTokens": data.Usage.PromptTokenDetails.CachedTokens,
-			"noCacheTokens":   data.Usage.PromptTokens - data.Usage.PromptTokenDetails.CachedTokens,
-		},
-		"outputTokenDetails": map[string]any{
-			"textTokens":      data.Usage.CompletionTokens - data.Usage.CompletionTokensDetails.ReasoningTokens,
-			"reasoningTokens": data.Usage.CompletionTokensDetails.ReasoningTokens,
-		},
-		"reasoningTokens": data.Usage.CompletionTokensDetails.ReasoningTokens,
-	}
+	return usageMetadata(data.Usage)
 }
 
 func normalizeFinishReason(reason string) string {

@@ -373,7 +373,7 @@ Redis 保存：
 - active messages：运行中的请求快照。
 - committed session messages：已完成或已取消后的 session 历史。
 - Redis Stream 事件。
-- usage，通过最终 `finish` 事件持久化。
+- usage，通过最终 `finish` 事件持久化；成功完成的 assistant history message 也会保留 `ResponseMeta.Usage`。
 
 默认 Redis key TTL 为 7 天，也就是 `einoai.DefaultRedisTTL`。示例服务可通过 `REDIS_TTL` 覆盖，代码接入可通过 `einoai.WithRedisTTL(ttl)` 覆盖；传入 `0` 或负数表示不设置过期时间。
 

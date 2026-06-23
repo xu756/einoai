@@ -58,7 +58,9 @@ func main() {
 			Mode: maintnotifications.ModeDisabled,
 		},
 	})
-	defer rdb.Close()
+	defer func() {
+		_ = rdb.Close()
+	}()
 
 	a := &app{
 		model: chatModel,
