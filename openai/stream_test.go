@@ -249,6 +249,54 @@ func TestWriteChatCompletionStreamOrdersReasoningToolsFinishAndUsage(t *testing.
 	}
 }
 
+func TestCollectChatCompletionIncludesReasoningToolsAndUsage(t *testing.T) {
+	body, err := CollectChatCompletion(context.Background(), ChatCompletionsRequest{Model: "gpt-4o"}, &sliceEventStream{events: []*einoai.RunEvent{
+		{Type: einoai.EventReasoningDelta, Data: einoai.ReasoningData{Delta: "think"}},
+		{Type: einoai.EventToolCall, Data: einoai.ToolCallData{ID: "call_1", Name: "weather", Index: 0}},
+		{Type: einoai.EventToolCall, Data: einoai.ToolCallData{ID: "call_1", Name: "weather", Arguments: `{"city":"郑州"}`, Index: 0}},
+		{Type: einoai.EventFinish, Data: einoai.FinishData{
+			FinishReason: "tool_calls",
+			Usage:        &schema.TokenUsage{PromptTokens: 5, CompletionTokens: 2, TotalTokens: 7},
+		}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	choices := body["choices"].([]map[string]any)
+	message := choices[0]["message"].(map[string]any)
+	toolCalls, ok := message["tool_calls"].([]ToolCall)
+	if message["reasoning_content"] != "think" || !ok || len(toolCalls) != 1 {
+		t.Fatalf("missing completion data: %#v", body)
+	}
+	if toolCalls[0].Function.Arguments != `{"city":"郑州"}` {
+		t.Fatalf("tool arguments missing: %#v", toolCalls)
+	}
+	completionUsage, ok := body["usage"].(*usage)
+	if !ok || completionUsage.TotalTokens != 7 {
+		t.Fatalf("usage missing: %#v", body)
+	}
+}
+
+func TestCollectChatCompletionOmitsAutomaticallyExecutedIntermediateTools(t *testing.T) {
+	body, err := CollectChatCompletion(context.Background(), ChatCompletionsRequest{Model: "gpt-4o"}, &sliceEventStream{events: []*einoai.RunEvent{
+		{Type: einoai.EventToolCall, Data: einoai.ToolCallData{ID: "call_1", Name: "weather", Arguments: `{}`, Index: 0}},
+		{Type: einoai.EventFinish, Data: einoai.FinishData{FinishReason: "tool_calls"}},
+		{Type: einoai.EventToolResult, Data: einoai.ToolResultData{ToolCallID: "call_1", Name: "weather", Content: "sunny"}},
+		{Type: einoai.EventTextDelta, Data: einoai.TextData{Delta: "It is sunny."}},
+		{Type: einoai.EventFinish, Data: einoai.FinishData{FinishReason: "stop"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := body["choices"].([]map[string]any)[0]["message"].(map[string]any)
+	if _, exists := message["tool_calls"]; exists {
+		t.Fatalf("intermediate tool calls leaked into final answer: %#v", message)
+	}
+	if message["content"] != "It is sunny." {
+		t.Fatalf("final content missing: %#v", message)
+	}
+}
+
 func decodeChunks(t *testing.T, body string) []chatCompletionChunk {
 	t.Helper()
 	var chunks []chatCompletionChunk

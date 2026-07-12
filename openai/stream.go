@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/xu756/einoai"
@@ -184,8 +186,11 @@ func (c chatCompletionChunk) MarshalJSON() ([]byte, error) {
 
 // CollectChatCompletion aggregates a non-streaming response body.
 func CollectChatCompletion(ctx context.Context, req ChatCompletionsRequest, stream einoai.EventStream) (map[string]any, error) {
-	var content string
-	var finishReason any = "stop"
+	var content strings.Builder
+	var reasoning strings.Builder
+	toolCalls := make(map[int]*ToolCall)
+	var finalUsage *usage
+	finishReason := "stop"
 	for {
 		ev, err := stream.Next(ctx)
 		if err == io.EOF {
@@ -200,31 +205,85 @@ func CollectChatCompletion(ctx context.Context, req ChatCompletionsRequest, stre
 		switch ev.Type {
 		case einoai.EventTextDelta:
 			data, _ := einoai.DecodeEventData[einoai.TextData](ev)
-			content += data.Delta
+			content.WriteString(data.Delta)
+		case einoai.EventReasoningDelta:
+			data, _ := einoai.DecodeEventData[einoai.ReasoningData](ev)
+			reasoning.WriteString(data.Delta)
+		case einoai.EventToolCall:
+			data, _ := einoai.DecodeEventData[einoai.ToolCallData](ev)
+			call := toolCalls[data.Index]
+			if call == nil {
+				index := data.Index
+				call = &ToolCall{
+					ID:    data.ID,
+					Type:  "function",
+					Index: &index,
+					Function: FunctionCall{
+						Name: data.Name,
+					},
+				}
+				toolCalls[data.Index] = call
+			}
+			if data.ID != "" {
+				call.ID = data.ID
+			}
+			if data.Name != "" {
+				call.Function.Name = data.Name
+			}
+			call.Function.Arguments += data.Arguments
+		case einoai.EventToolResult:
+			toolCalls = make(map[int]*ToolCall)
 		case einoai.EventFinish:
 			data, _ := einoai.DecodeEventData[einoai.FinishData](ev)
 			if data.FinishReason != "" {
-				finishReason = data.FinishReason
+				finishReason = normalizeFinishReason(data.FinishReason)
+			}
+			if data.Usage != nil {
+				finalUsage = convertUsage(data.Usage)
 			}
 		case einoai.EventError:
 			data, _ := einoai.DecodeEventData[einoai.ErrorData](ev)
 			return nil, fmt.Errorf("%s", data.Message)
 		}
 	}
-	return map[string]any{
+	indexes := make([]int, 0, len(toolCalls))
+	for index := range toolCalls {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+	orderedCalls := make([]ToolCall, 0, len(indexes))
+	for _, index := range indexes {
+		orderedCalls = append(orderedCalls, *toolCalls[index])
+	}
+	contentValue := any(content.String())
+	if len(orderedCalls) > 0 && content.Len() == 0 {
+		contentValue = nil
+	}
+	message := map[string]any{
+		"role":    "assistant",
+		"content": contentValue,
+	}
+	if reasoning.Len() > 0 {
+		message["reasoning_content"] = reasoning.String()
+	}
+	if len(orderedCalls) > 0 {
+		message["tool_calls"] = orderedCalls
+	}
+	body := map[string]any{
 		"id":      "chatcmpl-" + fmt.Sprintf("%d", time.Now().UnixNano()),
 		"object":  "chat.completion",
 		"created": time.Now().Unix(),
 		"model":   req.Model,
 		"choices": []map[string]any{{
-			"index": 0,
-			"message": map[string]any{
-				"role":    "assistant",
-				"content": content,
-			},
+			"index":         0,
+			"message":       message,
 			"finish_reason": finishReason,
 		}},
-	}, nil
+	}
+	if finalUsage != nil {
+		body["usage"] = finalUsage
+	}
+	return body, nil
 }
 
 func writeEvent(w chatCompletionStreamWriter, state *streamState, ev *einoai.RunEvent) (bool, error) {
