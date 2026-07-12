@@ -120,7 +120,12 @@ func (a *app) getOpenAIRun(c *gin.Context) {
 		writeOpenAIError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, openai.NewRunResponse(run, messages))
+	response, err := openai.NewRunResponse(run, messages)
+	if err != nil {
+		writeOpenAIError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (a *app) subscribeOpenAIEvents(c *gin.Context) {

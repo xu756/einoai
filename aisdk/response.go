@@ -13,11 +13,8 @@ type CreateRunResponse struct {
 	Metadata  map[string]any   `json:"metadata,omitempty"`
 }
 
-// RunResponse is the default AI SDK get-run response shape.
-type RunResponse struct {
-	Run      *einoai.RunInfo `json:"run"`
-	Messages []Message       `json:"messages"`
-}
+// RunResponse is the protocol-neutral get-run response shape.
+type RunResponse = einoai.SessionRunResponse
 
 // CancelResponse is the default AI SDK cancel response shape.
 type CancelResponse struct {
@@ -43,11 +40,8 @@ func NewCreateRunResponse(run *einoai.RunInfo) CreateRunResponse {
 }
 
 // NewRunResponse converts a run into a response struct.
-func NewRunResponse(run *einoai.RunInfo, messages []*schema.Message) RunResponse {
-	return RunResponse{
-		Run:      run,
-		Messages: FromSchemaMessages(messages),
-	}
+func NewRunResponse(run *einoai.RunInfo, messages []*schema.Message) (RunResponse, error) {
+	return einoai.NewSessionRunResponse(run, messages)
 }
 
 // NewCancelResponse returns a successful cancel response struct.

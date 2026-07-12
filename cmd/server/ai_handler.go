@@ -112,7 +112,12 @@ func (a *app) getAIRun(c *gin.Context) {
 		writeAIError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, aisdk.NewRunResponse(run, messages))
+	response, err := aisdk.NewRunResponse(run, messages)
+	if err != nil {
+		writeAIError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (a *app) subscribeAIEvents(c *gin.Context) {
