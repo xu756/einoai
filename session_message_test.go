@@ -82,3 +82,72 @@ func TestNewSessionRunResponseRejectsNonJSONMetadata(t *testing.T) {
 		t.Fatalf("expected metadata error, got %v", err)
 	}
 }
+
+func TestNewSessionRunResponsePreservesMultimodalParts(t *testing.T) {
+	imageURL := "https://example.com/a.png"
+	audioData := "YXVkaW8="
+	videoURL := "https://example.com/a.mp4"
+	fileData := "ZmlsZQ=="
+	response, err := NewSessionRunResponse(nil, []*schema.Message{
+		{
+			Role: schema.User,
+			UserInputMultiContent: []schema.MessageInputPart{
+				{Type: schema.ChatMessagePartTypeText, Text: "inspect"},
+				{
+					Type: schema.ChatMessagePartTypeImageURL,
+					Image: &schema.MessageInputImage{
+						MessagePartCommon: schema.MessagePartCommon{URL: &imageURL, MIMEType: "image/png"},
+						Detail:            schema.ImageURLDetailHigh,
+					},
+				},
+				{
+					Type: schema.ChatMessagePartTypeAudioURL,
+					Audio: &schema.MessageInputAudio{MessagePartCommon: schema.MessagePartCommon{
+						Base64Data: &audioData,
+						MIMEType:   "audio/wav",
+					}},
+				},
+				{
+					Type: schema.ChatMessagePartTypeVideoURL,
+					Video: &schema.MessageInputVideo{MessagePartCommon: schema.MessagePartCommon{
+						URL:      &videoURL,
+						MIMEType: "video/mp4",
+					}},
+				},
+				{
+					Type: schema.ChatMessagePartTypeFileURL,
+					File: &schema.MessageInputFile{
+						MessagePartCommon: schema.MessagePartCommon{Base64Data: &fileData, MIMEType: "application/pdf"},
+						Name:              "a.pdf",
+					},
+				},
+			},
+		},
+		{
+			Role: schema.Assistant,
+			AssistantGenMultiContent: []schema.MessageOutputPart{
+				{
+					Type:      schema.ChatMessagePartTypeReasoning,
+					Reasoning: &schema.MessageOutputReasoning{Text: "inspect pixels", Signature: "sig_1"},
+				},
+				{
+					Type: schema.ChatMessagePartTypeImageURL,
+					Image: &schema.MessageOutputImage{MessagePartCommon: schema.MessagePartCommon{
+						URL:      &imageURL,
+						MIMEType: "image/png",
+					}},
+				},
+				{Type: schema.ChatMessagePartType("provider_blob"), Extra: map[string]any{"provider_id": "p1"}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := response.Messages[0].Parts; len(got) != 5 || got[1].Type != "image" || got[4].Name != "a.pdf" {
+		t.Fatalf("unexpected input parts: %#v", got)
+	}
+	if got := response.Messages[1].Parts; len(got) != 3 || got[0].Signature != "sig_1" || got[2].Type != "data" {
+		t.Fatalf("unexpected output parts: %#v", got)
+	}
+}

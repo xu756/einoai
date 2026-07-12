@@ -101,8 +101,19 @@ func newSessionMessage(message *schema.Message, index int) (SessionMessage, erro
 			ToolName:   message.ToolName,
 			Output:     parseSessionValue(message.Content),
 		})
-	} else if message.Content != "" {
-		out.Parts = append(out.Parts, SessionPart{Type: "text", Text: message.Content})
+	} else {
+		switch {
+		case len(message.UserInputMultiContent) > 0:
+			for _, part := range message.UserInputMultiContent {
+				out.Parts = append(out.Parts, inputSessionPart(part))
+			}
+		case len(message.AssistantGenMultiContent) > 0:
+			for _, part := range message.AssistantGenMultiContent {
+				out.Parts = append(out.Parts, outputSessionPart(part))
+			}
+		case message.Content != "":
+			out.Parts = append(out.Parts, SessionPart{Type: "text", Text: message.Content})
+		}
 	}
 	for _, call := range message.ToolCalls {
 		out.Parts = append(out.Parts, SessionPart{
@@ -178,4 +189,106 @@ func newSessionUsage(usage *schema.TokenUsage) *SessionUsage {
 			TextTokens:      normalized.TextOutputTokens,
 		},
 	}
+}
+
+func inputSessionPart(part schema.MessageInputPart) SessionPart {
+	switch part.Type {
+	case schema.ChatMessagePartTypeText:
+		return SessionPart{Type: "text", Text: part.Text, Metadata: publicMetadata(part.Extra)}
+	case schema.ChatMessagePartTypeImageURL:
+		return mediaSessionPart("image", inputPartCommon(part), inputImageDetail(part), "", part.Extra)
+	case schema.ChatMessagePartTypeAudioURL:
+		return mediaSessionPart("audio", inputPartCommon(part), "", "", part.Extra)
+	case schema.ChatMessagePartTypeVideoURL:
+		return mediaSessionPart("video", inputPartCommon(part), "", "", part.Extra)
+	case schema.ChatMessagePartTypeFileURL:
+		name := ""
+		if part.File != nil {
+			name = part.File.Name
+		}
+		return mediaSessionPart("file", inputPartCommon(part), "", name, part.Extra)
+	default:
+		data := map[string]any{"metadata": publicMetadata(part.Extra)}
+		if part.ToolSearchResult != nil {
+			data["tool_search_result"] = part.ToolSearchResult
+		}
+		return SessionPart{Type: "data", DataType: string(part.Type), Data: data}
+	}
+}
+
+func outputSessionPart(part schema.MessageOutputPart) SessionPart {
+	switch part.Type {
+	case schema.ChatMessagePartTypeText:
+		return SessionPart{Type: "text", Text: part.Text, Metadata: publicMetadata(part.Extra)}
+	case schema.ChatMessagePartTypeReasoning:
+		if part.Reasoning == nil {
+			return SessionPart{Type: "reasoning", Metadata: publicMetadata(part.Extra)}
+		}
+		return SessionPart{
+			Type:      "reasoning",
+			Text:      part.Reasoning.Text,
+			Signature: part.Reasoning.Signature,
+			Metadata:  publicMetadata(part.Extra),
+		}
+	case schema.ChatMessagePartTypeImageURL:
+		return mediaSessionPart("image", outputPartCommon(part), "", "", part.Extra)
+	case schema.ChatMessagePartTypeAudioURL:
+		return mediaSessionPart("audio", outputPartCommon(part), "", "", part.Extra)
+	case schema.ChatMessagePartTypeVideoURL:
+		return mediaSessionPart("video", outputPartCommon(part), "", "", part.Extra)
+	default:
+		return SessionPart{Type: "data", DataType: string(part.Type), Data: publicMetadata(part.Extra)}
+	}
+}
+
+func inputPartCommon(part schema.MessageInputPart) schema.MessagePartCommon {
+	switch {
+	case part.Image != nil:
+		return part.Image.MessagePartCommon
+	case part.Audio != nil:
+		return part.Audio.MessagePartCommon
+	case part.Video != nil:
+		return part.Video.MessagePartCommon
+	case part.File != nil:
+		return part.File.MessagePartCommon
+	default:
+		return schema.MessagePartCommon{}
+	}
+}
+
+func outputPartCommon(part schema.MessageOutputPart) schema.MessagePartCommon {
+	switch {
+	case part.Image != nil:
+		return part.Image.MessagePartCommon
+	case part.Audio != nil:
+		return part.Audio.MessagePartCommon
+	case part.Video != nil:
+		return part.Video.MessagePartCommon
+	default:
+		return schema.MessagePartCommon{}
+	}
+}
+
+func inputImageDetail(part schema.MessageInputPart) string {
+	if part.Image == nil {
+		return ""
+	}
+	return string(part.Image.Detail)
+}
+
+func mediaSessionPart(partType string, common schema.MessagePartCommon, detail, name string, extra map[string]any) SessionPart {
+	out := SessionPart{
+		Type:      partType,
+		MediaType: common.MIMEType,
+		Detail:    detail,
+		Name:      name,
+		Metadata:  publicMetadata(extra),
+	}
+	if common.URL != nil {
+		out.URL = *common.URL
+	}
+	if common.Base64Data != nil {
+		out.Base64Data = *common.Base64Data
+	}
+	return out
 }
