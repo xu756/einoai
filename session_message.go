@@ -146,6 +146,29 @@ func sessionMessageID(message *schema.Message, index int) string {
 	return fmt.Sprintf("msg_%d", index)
 }
 
+func assignSessionMessageID(message *schema.Message, runID, namespace string, index int) {
+	if message == nil {
+		return
+	}
+	if message.Extra == nil {
+		message.Extra = make(map[string]any)
+	}
+	if id, _ := message.Extra[sessionMessageIDExtraKey].(string); id != "" {
+		return
+	}
+	if uiID, _ := message.Extra["_einoai_ui_id"].(string); uiID != "" {
+		message.Extra[sessionMessageIDExtraKey] = uiID
+		return
+	}
+	message.Extra[sessionMessageIDExtraKey] = fmt.Sprintf("msg_%s_%s_%d", runID, namespace, index)
+}
+
+func assignSessionMessageIDs(messages []*schema.Message, runID, namespace string) {
+	for index, message := range messages {
+		assignSessionMessageID(message, runID, namespace, index)
+	}
+}
+
 func publicMetadata(extra map[string]any) map[string]any {
 	var out map[string]any
 	for key, value := range extra {

@@ -82,6 +82,7 @@ func (b *runEventBuilder) writeMessage(ctx context.Context, msg *schema.Message)
 		}
 	}
 	if msg.Role == schema.Tool {
+		assignSessionMessageID(msg, b.runID, "output", len(b.outputMessages))
 		b.outputMessages = append(b.outputMessages, msg)
 		if _, err := b.service.appendEvent(ctx, b.sessionID, b.runID, EventToolResult, ToolResultData{
 			ToolCallID: msg.ToolCallID,
@@ -286,6 +287,7 @@ func (b *runEventBuilder) commitAssistantMessage() error {
 		}
 		msg.ResponseMeta.Usage = b.usage
 	}
+	assignSessionMessageID(msg, b.runID, "output", len(b.outputMessages))
 	b.outputMessages = append(b.outputMessages, msg)
 	b.assistantChunks = nil
 	return nil

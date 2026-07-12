@@ -110,6 +110,24 @@ func TestRequestSnapshotMessagesUsesFullRequestBody(t *testing.T) {
 	}
 }
 
+func TestAssignSessionMessageIDsPreservesExistingIDs(t *testing.T) {
+	messages := []*schema.Message{
+		{Role: schema.User, Extra: map[string]any{sessionMessageIDExtraKey: "client_1"}},
+		{Role: schema.User},
+		{Role: schema.User, Extra: map[string]any{"_einoai_ui_id": "ui_1"}},
+	}
+	assignSessionMessageIDs(messages, "run_1", "input")
+	if messages[0].Extra[sessionMessageIDExtraKey] != "client_1" {
+		t.Fatalf("existing ID changed: %#v", messages[0].Extra)
+	}
+	if messages[1].Extra[sessionMessageIDExtraKey] != "msg_run_1_input_1" {
+		t.Fatalf("generated ID missing: %#v", messages[1].Extra)
+	}
+	if messages[2].Extra[sessionMessageIDExtraKey] != "ui_1" {
+		t.Fatalf("AI SDK ID was not preserved: %#v", messages[2].Extra)
+	}
+}
+
 func TestServiceGetMessagesReturnsActiveSnapshotWhenRunIsActive(t *testing.T) {
 	store, cleanup := newTestRedisStore(t)
 	defer cleanup()

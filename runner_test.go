@@ -132,4 +132,15 @@ func TestRunEventBuilderPreservesUsageOnCommittedAssistantMessage(t *testing.T) 
 	if messages[0].ResponseMeta.Usage.TotalTokens != usage.TotalTokens {
 		t.Fatalf("expected total tokens %d, got %#v", usage.TotalTokens, messages[0].ResponseMeta.Usage)
 	}
+	if messages[0].Extra[sessionMessageIDExtraKey] != "msg_r1_output_0" {
+		t.Fatalf("expected generated assistant message ID, got %#v", messages[0].Extra)
+	}
+}
+
+func TestAssignSessionMessageIDUsesOutputNamespace(t *testing.T) {
+	message := &schema.Message{Role: schema.Tool}
+	assignSessionMessageID(message, "run_1", "output", 0)
+	if message.Extra[sessionMessageIDExtraKey] != "msg_run_1_output_0" {
+		t.Fatalf("generated output ID missing: %#v", message)
+	}
 }

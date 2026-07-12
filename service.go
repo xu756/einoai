@@ -56,14 +56,14 @@ func (s *service) CreateRun(ctx context.Context, req CreateRunRequest) (*RunInfo
 	if currentRun != nil {
 		_ = s.store.clearCurrentRunIfMatches(ctx, req.SessionID, currentRun.RunID)
 	}
-	runMessages := append([]*schema.Message{}, snapshotMessages...)
-
 	run := &RunInfo{
 		SessionID: req.SessionID,
 		RunID:     newRunID(),
 		Status:    RunStatusQueued,
 		Metadata:  req.Metadata,
 	}
+	assignSessionMessageIDs(snapshotMessages, run.RunID, "input")
+	runMessages := append([]*schema.Message{}, snapshotMessages...)
 	if err := s.store.initRun(ctx, run); err != nil {
 		return nil, err
 	}
