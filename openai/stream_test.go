@@ -187,6 +187,68 @@ func TestWriteChatCompletionStreamToWritesWithoutGin(t *testing.T) {
 	}
 }
 
+func TestWriteChatCompletionStreamUsesDataLinesOnly(t *testing.T) {
+	var buf bytes.Buffer
+	err := WriteChatCompletionStreamTo(context.Background(), &buf, nil, ChatCompletionsRequest{
+		Model:  "gpt-4o",
+		Stream: true,
+	}, &sliceEventStream{events: []*einoai.RunEvent{
+		{ID: "1-0", Type: einoai.EventReasoningDelta, Data: einoai.ReasoningData{Delta: "think"}},
+		{ID: "1-1", Type: einoai.EventFinish, Data: einoai.FinishData{FinishReason: "stop"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "id: ") {
+		t.Fatalf("unexpected SSE id field:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"reasoning_content":"think"`) {
+		t.Fatalf("reasoning chunk missing:\n%s", buf.String())
+	}
+}
+
+func TestWriteChatCompletionStreamOrdersReasoningToolsFinishAndUsage(t *testing.T) {
+	var buf bytes.Buffer
+	err := WriteChatCompletionStreamTo(context.Background(), &buf, nil, ChatCompletionsRequest{
+		Model:         "gpt-4o",
+		Stream:        true,
+		StreamOptions: &StreamOptions{IncludeUsage: true},
+	}, &sliceEventStream{events: []*einoai.RunEvent{
+		{Type: einoai.EventReasoningDelta, Data: einoai.ReasoningData{Delta: "think"}},
+		{Type: einoai.EventToolCall, Data: einoai.ToolCallData{ID: "call_1", Name: "weather", Index: 0}},
+		{Type: einoai.EventToolCall, Data: einoai.ToolCallData{ID: "call_1", Name: "weather", Arguments: `{"city":"郑州"}`, Index: 0}},
+		{Type: einoai.EventFinish, Data: einoai.FinishData{FinishReason: "tool_calls"}},
+		{Type: einoai.EventTextDelta, Data: einoai.TextData{Delta: "sunny"}},
+		{Type: einoai.EventFinish, Data: einoai.FinishData{
+			FinishReason: "stop",
+			Usage:        &schema.TokenUsage{PromptTokens: 5, CompletionTokens: 2, TotalTokens: 7},
+		}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunks := decodeChunks(t, buf.String())
+	if len(chunks) != 8 {
+		t.Fatalf("expected 8 ordered chunks, got %d: %#v", len(chunks), chunks)
+	}
+	if chunks[0].Choices[0].Delta.Role != "assistant" || chunks[1].Choices[0].Delta.ReasoningContent != "think" {
+		t.Fatalf("role/reasoning order is wrong: %#v", chunks[:2])
+	}
+	if chunks[2].Choices[0].Delta.ToolCalls[0].ID != "call_1" || chunks[3].Choices[0].Delta.ToolCalls[0].Function.Arguments == "" {
+		t.Fatalf("tool deltas are wrong: %#v", chunks[2:4])
+	}
+	if chunks[4].Choices[0].FinishReason != "tool_calls" || chunks[6].Choices[0].FinishReason != "stop" {
+		t.Fatalf("finish chunks are wrong: %#v %#v", chunks[4], chunks[6])
+	}
+	final := chunks[7]
+	if len(final.Choices) != 0 || final.Usage == nil || final.Usage.TotalTokens != 7 {
+		t.Fatalf("final usage chunk is wrong: %#v", final)
+	}
+	if !strings.HasSuffix(buf.String(), "data: [DONE]\n\n") {
+		t.Fatalf("DONE is not last:\n%s", buf.String())
+	}
+}
+
 func decodeChunks(t *testing.T, body string) []chatCompletionChunk {
 	t.Helper()
 	var chunks []chatCompletionChunk

@@ -92,7 +92,7 @@ func SetChatCompletionStreamHeaders(header http.Header) {
 func WriteChatCompletionStreamTo(ctx context.Context, writer io.Writer, flush FlushFunc, req ChatCompletionsRequest, stream einoai.EventStream) error {
 	out := chatCompletionStreamWriter{writer: writer, flush: flush}
 	state := newStreamState(req)
-	if err := out.writeChunk("", state.chunk([]choice{{Index: 0, Delta: delta{Role: "assistant"}, FinishReason: nil}}, nil)); err != nil {
+	if err := out.writeChunk(state.chunk([]choice{{Index: 0, Delta: delta{Role: "assistant"}, FinishReason: nil}}, nil)); err != nil {
 		return err
 	}
 
@@ -249,10 +249,10 @@ func writeEvent(w chatCompletionStreamWriter, state *streamState, ev *einoai.Run
 			finishReason = normalizeFinishReason(data.FinishReason)
 		}
 		if finishReason != "tool_calls" && state.includeUsage {
-			if err := w.writeChunk(ev.ID, state.chunk([]choice{{Index: 0, Delta: d, FinishReason: finishReason}}, nil)); err != nil {
+			if err := w.writeChunk(state.chunk([]choice{{Index: 0, Delta: d, FinishReason: finishReason}}, nil)); err != nil {
 				return false, err
 			}
-			if err := w.writeChunk("", state.chunk([]choice{}, convertUsage(data.Usage))); err != nil {
+			if err := w.writeChunk(state.chunk([]choice{}, convertUsage(data.Usage))); err != nil {
 				return false, err
 			}
 			return true, nil
@@ -267,7 +267,7 @@ func writeEvent(w chatCompletionStreamWriter, state *streamState, ev *einoai.Run
 		return false, nil
 	}
 
-	if err := w.writeChunk(ev.ID, state.chunk([]choice{{Index: 0, Delta: d, FinishReason: finishReason}}, nil)); err != nil {
+	if err := w.writeChunk(state.chunk([]choice{{Index: 0, Delta: d, FinishReason: finishReason}}, nil)); err != nil {
 		return false, err
 	}
 	return ev.Type == einoai.EventFinish && finishReason != "tool_calls", nil
@@ -317,15 +317,10 @@ func convertUsage(u *schema.TokenUsage) *usage {
 	}
 }
 
-func (w chatCompletionStreamWriter) writeChunk(eventID string, chunk chatCompletionChunk) error {
+func (w chatCompletionStreamWriter) writeChunk(chunk chatCompletionChunk) error {
 	b, err := json.Marshal(chunk)
 	if err != nil {
 		return err
-	}
-	if eventID != "" {
-		if _, err := fmt.Fprintf(w.writer, "id: %s\n", eventID); err != nil {
-			return err
-		}
 	}
 	if _, err := fmt.Fprintf(w.writer, "data: %s\n\n", b); err != nil {
 		return err

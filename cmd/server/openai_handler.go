@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/xu756/einoai"
 	"github.com/xu756/einoai/openai"
@@ -143,12 +144,21 @@ func (a *app) subscribeOpenAIEvents(c *gin.Context) {
 		_ = stream.Close()
 	}()
 
-	req := openai.ChatCompletionsRequest{
+	req := openAISubscribeRequest(c)
+	openai.SetChatCompletionStreamHeaders(c.Writer.Header())
+	_ = openai.WriteChatCompletionStreamTo(c.Request.Context(), c.Writer, c.Writer.Flush, req, stream)
+}
+
+func openAISubscribeRequest(c *gin.Context) openai.ChatCompletionsRequest {
+	includeUsage, _ := strconv.ParseBool(c.Query("include_usage"))
+	request := openai.ChatCompletionsRequest{
 		Model:  c.Query("model"),
 		Stream: true,
 	}
-	openai.SetChatCompletionStreamHeaders(c.Writer.Header())
-	_ = openai.WriteChatCompletionStreamTo(c.Request.Context(), c.Writer, c.Writer.Flush, req, stream)
+	if includeUsage {
+		request.StreamOptions = &openai.StreamOptions{IncludeUsage: true}
+	}
+	return request
 }
 
 func (a *app) deleteOpenAISession(c *gin.Context) {
