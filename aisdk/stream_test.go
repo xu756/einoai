@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cloudwego/eino/schema"
 	"github.com/xu756/einoai"
 )
 
@@ -82,6 +83,58 @@ func TestWriteEventStreamToWritesWithoutGin(t *testing.T) {
 	}
 	if !strings.Contains(body, "data: [DONE]") {
 		t.Fatalf("expected done event, got:\n%s", body)
+	}
+}
+
+func TestWriteEventStreamOrdersReasoningToolsAndFinalUsage(t *testing.T) {
+	var buf bytes.Buffer
+	err := WriteEventStreamTo(context.Background(), &buf, nil, &aisdkSliceEventStream{events: []*einoai.RunEvent{
+		{RunID: "run_1", Type: einoai.EventReasoningStart, Data: einoai.ReasoningData{ID: "reasoning_1"}},
+		{RunID: "run_1", Type: einoai.EventReasoningDelta, Data: einoai.ReasoningData{ID: "reasoning_1", Delta: "think"}},
+		{RunID: "run_1", Type: einoai.EventReasoningEnd, Data: einoai.ReasoningData{ID: "reasoning_1"}},
+		{RunID: "run_1", Type: einoai.EventToolCall, Data: einoai.ToolCallData{ID: "call_1", Name: "weather", Arguments: `{}`, Index: 0}},
+		{RunID: "run_1", Type: einoai.EventFinish, Data: einoai.FinishData{FinishReason: "tool_calls"}},
+		{RunID: "run_1", Type: einoai.EventToolResult, Data: einoai.ToolResultData{ToolCallID: "call_1", Name: "weather", Content: "sunny"}},
+		{RunID: "run_1", Type: einoai.EventTextStart, Data: einoai.TextData{ID: "text_1"}},
+		{RunID: "run_1", Type: einoai.EventTextDelta, Data: einoai.TextData{ID: "text_1", Delta: "sunny"}},
+		{RunID: "run_1", Type: einoai.EventTextEnd, Data: einoai.TextData{ID: "text_1"}},
+		{RunID: "run_1", Type: einoai.EventFinish, Data: einoai.FinishData{
+			FinishReason: "stop",
+			Usage:        &schema.TokenUsage{PromptTokens: 5, CompletionTokens: 2, TotalTokens: 7},
+		}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := buf.String()
+	ordered := []string{
+		`"type":"start"`,
+		`"type":"start-step"`,
+		`"type":"reasoning-start"`,
+		`"type":"reasoning-delta"`,
+		`"type":"reasoning-end"`,
+		`"type":"tool-input-start"`,
+		`"type":"tool-input-delta"`,
+		`"type":"tool-input-available"`,
+		`"type":"finish-step"`,
+		`"type":"start-step"`,
+		`"type":"tool-output-available"`,
+		`"type":"text-start"`,
+		`"type":"text-delta"`,
+		`"type":"text-end"`,
+		`"type":"finish"`,
+		"data: [DONE]",
+	}
+	position := -1
+	for _, marker := range ordered {
+		next := strings.Index(body[position+1:], marker)
+		if next < 0 {
+			t.Fatalf("missing or out-of-order %s:\n%s", marker, body)
+		}
+		position += next + 1
+	}
+	if !strings.Contains(body, `"totalTokens":7`) {
+		t.Fatalf("final usage missing:\n%s", body)
 	}
 }
 

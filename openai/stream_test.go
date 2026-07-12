@@ -297,6 +297,23 @@ func TestCollectChatCompletionOmitsAutomaticallyExecutedIntermediateTools(t *tes
 	}
 }
 
+func TestConvertUsagePreservesNormalizedDetails(t *testing.T) {
+	got := convertUsage(&schema.TokenUsage{
+		PromptTokens:     2,
+		CompletionTokens: 1,
+		TotalTokens:      3,
+		PromptTokenDetails: schema.PromptTokenDetails{
+			CachedTokens: 5,
+		},
+		CompletionTokensDetails: schema.CompletionTokensDetails{
+			ReasoningTokens: 4,
+		},
+	})
+	if got.PromptTokensDetails.CachedTokens != 5 || got.CompletionTokensDetails.ReasoningTokens != 4 {
+		t.Fatalf("detail counts were lost: %#v", got)
+	}
+}
+
 func decodeChunks(t *testing.T, body string) []chatCompletionChunk {
 	t.Helper()
 	var chunks []chatCompletionChunk

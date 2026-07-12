@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/schema"
+	"github.com/xu756/einoai"
 )
 
 const (
@@ -259,20 +260,24 @@ func mergeUsageMetadata(m *Message, msg *schema.Message) {
 }
 
 func usageMetadata(usage *schema.TokenUsage) map[string]any {
+	normalized := einoai.NormalizeTokenUsage(usage)
+	if normalized == nil {
+		return nil
+	}
 	return map[string]any{
-		"inputTokens":       usage.PromptTokens,
-		"outputTokens":      usage.CompletionTokens,
-		"totalTokens":       usage.TotalTokens,
-		"cachedInputTokens": usage.PromptTokenDetails.CachedTokens,
+		"inputTokens":       normalized.InputTokens,
+		"outputTokens":      normalized.OutputTokens,
+		"totalTokens":       normalized.TotalTokens,
+		"cachedInputTokens": normalized.CachedInputTokens,
 		"inputTokenDetails": map[string]any{
-			"cacheReadTokens": usage.PromptTokenDetails.CachedTokens,
-			"noCacheTokens":   usage.PromptTokens - usage.PromptTokenDetails.CachedTokens,
+			"cacheReadTokens": normalized.CachedInputTokens,
+			"noCacheTokens":   normalized.UncachedInputTokens,
 		},
 		"outputTokenDetails": map[string]any{
-			"textTokens":      usage.CompletionTokens - usage.CompletionTokensDetails.ReasoningTokens,
-			"reasoningTokens": usage.CompletionTokensDetails.ReasoningTokens,
+			"textTokens":      normalized.TextOutputTokens,
+			"reasoningTokens": normalized.ReasoningTokens,
 		},
-		"reasoningTokens": usage.CompletionTokensDetails.ReasoningTokens,
+		"reasoningTokens": normalized.ReasoningTokens,
 	}
 }
 

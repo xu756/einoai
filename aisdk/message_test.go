@@ -209,3 +209,22 @@ func TestFromSchemaMessagesAddsUsageToAssistantMetadata(t *testing.T) {
 		t.Fatalf("unexpected usage metadata: %#v", usage)
 	}
 }
+
+func TestUsageMetadataClampsDerivedTokenCounts(t *testing.T) {
+	got := usageMetadata(&schema.TokenUsage{
+		PromptTokens:     1,
+		CompletionTokens: 1,
+		TotalTokens:      2,
+		PromptTokenDetails: schema.PromptTokenDetails{
+			CachedTokens: 3,
+		},
+		CompletionTokensDetails: schema.CompletionTokensDetails{
+			ReasoningTokens: 4,
+		},
+	})
+	input := got["inputTokenDetails"].(map[string]any)
+	output := got["outputTokenDetails"].(map[string]any)
+	if input["noCacheTokens"] != 0 || output["textTokens"] != 0 {
+		t.Fatalf("negative derived usage leaked: %#v", got)
+	}
+}

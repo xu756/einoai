@@ -360,18 +360,19 @@ func normalizeFinishReason(reason string) string {
 }
 
 func convertUsage(u *schema.TokenUsage) *usage {
-	if u == nil {
+	normalized := einoai.NormalizeTokenUsage(u)
+	if normalized == nil {
 		return nil
 	}
 	return &usage{
-		PromptTokens:     u.PromptTokens,
-		CompletionTokens: u.CompletionTokens,
-		TotalTokens:      u.TotalTokens,
+		PromptTokens:     normalized.InputTokens,
+		CompletionTokens: normalized.OutputTokens,
+		TotalTokens:      normalized.TotalTokens,
 		PromptTokensDetails: promptTokensDetails{
-			CachedTokens: u.PromptTokenDetails.CachedTokens,
+			CachedTokens: normalized.CachedInputTokens,
 		},
 		CompletionTokensDetails: completionTokensDetails{
-			ReasoningTokens: u.CompletionTokensDetails.ReasoningTokens,
+			ReasoningTokens: normalized.ReasoningTokens,
 		},
 	}
 }
