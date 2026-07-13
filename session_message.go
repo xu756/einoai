@@ -231,11 +231,7 @@ func inputSessionPart(part schema.MessageInputPart) SessionPart {
 		}
 		return mediaSessionPart("file", inputPartCommon(part), "", name, part.Extra)
 	default:
-		data := map[string]any{"metadata": publicMetadata(part.Extra)}
-		if part.ToolSearchResult != nil {
-			data["tool_search_result"] = part.ToolSearchResult
-		}
-		return SessionPart{Type: "data", DataType: string(part.Type), Data: data}
+		return SessionPart{Type: "data", DataType: string(part.Type), Data: unknownInputPartData(part)}
 	}
 }
 
@@ -260,7 +256,7 @@ func outputSessionPart(part schema.MessageOutputPart) SessionPart {
 	case schema.ChatMessagePartTypeVideoURL:
 		return mediaSessionPart("video", outputPartCommon(part), "", "", part.Extra)
 	default:
-		return SessionPart{Type: "data", DataType: string(part.Type), Data: publicMetadata(part.Extra)}
+		return SessionPart{Type: "data", DataType: string(part.Type), Data: unknownOutputPartData(part)}
 	}
 }
 
@@ -314,4 +310,79 @@ func mediaSessionPart(partType string, common schema.MessagePartCommon, detail, 
 		out.Base64Data = *common.Base64Data
 	}
 	return out
+}
+
+func unknownInputPartData(part schema.MessageInputPart) map[string]any {
+	data := make(map[string]any)
+	if part.Text != "" {
+		data["text"] = part.Text
+	}
+	if metadata := publicMetadata(part.Extra); len(metadata) > 0 {
+		data["metadata"] = metadata
+	}
+	if part.Image != nil {
+		data["image"] = mediaPartData(part.Image.MessagePartCommon, string(part.Image.Detail), "")
+	}
+	if part.Audio != nil {
+		data["audio"] = mediaPartData(part.Audio.MessagePartCommon, "", "")
+	}
+	if part.Video != nil {
+		data["video"] = mediaPartData(part.Video.MessagePartCommon, "", "")
+	}
+	if part.File != nil {
+		data["file"] = mediaPartData(part.File.MessagePartCommon, "", part.File.Name)
+	}
+	if part.ToolSearchResult != nil {
+		data["tool_search_result"] = part.ToolSearchResult
+	}
+	return data
+}
+
+func unknownOutputPartData(part schema.MessageOutputPart) map[string]any {
+	data := make(map[string]any)
+	if part.Text != "" {
+		data["text"] = part.Text
+	}
+	if metadata := publicMetadata(part.Extra); len(metadata) > 0 {
+		data["metadata"] = metadata
+	}
+	if part.Image != nil {
+		data["image"] = mediaPartData(part.Image.MessagePartCommon, "", "")
+	}
+	if part.Audio != nil {
+		data["audio"] = mediaPartData(part.Audio.MessagePartCommon, "", "")
+	}
+	if part.Video != nil {
+		data["video"] = mediaPartData(part.Video.MessagePartCommon, "", "")
+	}
+	if part.Reasoning != nil {
+		data["reasoning"] = map[string]any{
+			"text":      part.Reasoning.Text,
+			"signature": part.Reasoning.Signature,
+		}
+	}
+	return data
+}
+
+func mediaPartData(common schema.MessagePartCommon, detail, name string) map[string]any {
+	data := make(map[string]any)
+	if common.URL != nil {
+		data["url"] = *common.URL
+	}
+	if common.Base64Data != nil {
+		data["base64_data"] = *common.Base64Data
+	}
+	if common.MIMEType != "" {
+		data["media_type"] = common.MIMEType
+	}
+	if detail != "" {
+		data["detail"] = detail
+	}
+	if name != "" {
+		data["name"] = name
+	}
+	if metadata := publicMetadata(common.Extra); len(metadata) > 0 {
+		data["metadata"] = metadata
+	}
+	return data
 }

@@ -137,7 +137,7 @@ func TestNewSessionRunResponsePreservesMultimodalParts(t *testing.T) {
 						MIMEType: "image/png",
 					}},
 				},
-				{Type: schema.ChatMessagePartType("provider_blob"), Extra: map[string]any{"provider_id": "p1"}},
+				{Type: schema.ChatMessagePartType("provider_blob"), Text: "opaque", Extra: map[string]any{"provider_id": "p1"}},
 			},
 		},
 	})
@@ -149,5 +149,9 @@ func TestNewSessionRunResponsePreservesMultimodalParts(t *testing.T) {
 	}
 	if got := response.Messages[1].Parts; len(got) != 3 || got[0].Signature != "sig_1" || got[2].Type != "data" {
 		t.Fatalf("unexpected output parts: %#v", got)
+	}
+	unknown, ok := response.Messages[1].Parts[2].Data.(map[string]any)
+	if !ok || unknown["text"] != "opaque" {
+		t.Fatalf("unknown output data was lost: %#v", response.Messages[1].Parts[2])
 	}
 }
