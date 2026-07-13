@@ -189,15 +189,56 @@ GET /api/usechat/sessions/:sessionId
         "source": "web"
       }
     }
-  }
+  },
+  "messages": [
+    {
+      "id": "msg_run_xxx_input_0",
+      "role": "user",
+      "parts": [
+        {"type":"text","text":"分析图片"},
+        {"type":"image","url":"https://example.com/a.png","media_type":"image/png"}
+      ]
+    },
+    {
+      "id": "msg_run_xxx_output_0",
+      "role": "assistant",
+      "parts": [
+        {"type":"reasoning","text":"先识别图片"},
+        {"type":"tool-call","tool_call_id":"call_1","tool_name":"vision","input":{"url":"https://example.com/a.png"}}
+      ]
+    },
+    {
+      "id": "msg_run_xxx_output_1",
+      "role": "tool",
+      "parts": [
+        {"type":"tool-result","tool_call_id":"call_1","tool_name":"vision","output":{"objects":["cat"]}}
+      ]
+    },
+    {
+      "id": "msg_run_xxx_output_2",
+      "role": "assistant",
+      "parts": [{"type":"text","text":"图片中有一只猫"}],
+      "finish_reason": "stop",
+      "usage": {
+        "input_tokens": 100,
+        "output_tokens": 30,
+        "total_tokens": 130,
+        "input_token_details": {"cached_tokens":20,"uncached_tokens":80},
+        "output_token_details": {"reasoning_tokens":10,"text_tokens":20}
+      }
+    }
+  ]
 }
 ```
+
+`/api/usechat` 和 `/api/v1` 的 session GET 使用完全相同的协议无关消息格式。每条 Eino 消息独立返回，`parts.type` 支持 `text`、`reasoning`、`image`、`audio`、`video`、`file`、`tool-call`、`tool-result` 和 `data`。这是 breaking change：客户端应渲染 `messages[].parts`，而不是 AI SDK `UIMessage` 或 OpenAI `ChatMessage` 历史。
 
 如果 current run 不存在，核心服务返回 `run: null`：
 
 ```json
 {
-  "run": null
+  "run": null,
+  "messages": []
 }
 ```
 
@@ -260,7 +301,7 @@ data: [DONE]
 
 - `finish-step` 当前只输出 `type`，不携带 `finishReason`。
 - `message-metadata.messageMetadata.modelId` 来自 `MODEL_NAME` 环境变量。
-- usage 会在最终 `finish.messageMetadata.custom.usage` 中返回；历史消息回放时，assistant message 的 `metadata.custom.usage` 也会保留同样的结构。
+- usage 会在最终 `finish.messageMetadata.custom.usage` 中返回；session 历史使用统一消息顶层 `usage`。
 - AI SDK finish reason 会把核心事件中的 `tool_calls`、`content_filter` 转成 `tool-calls`、`content-filter`。
 - 如果是工具调用中间步骤，会先输出 `finish-step`，然后输出新的 `start-step` 继续下一步。
 
@@ -386,18 +427,18 @@ Session ID 解析顺序：
 #### 流式响应
 
 ```text
-data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000,"model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000,"model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}],"usage":null}
 
-id: 1748937600001-0
-data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"你好"},"finish_reason":null}]}
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"你好"},"finish_reason":null}],"usage":null}
 
-id: 1748937600001-1
-data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":5}}}
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":null}
+
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000,"model":"gpt-4o","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":5}}}
 
 data: [DONE]
 ```
 
-Reasoning 输出：
+Reasoning 使用常见 OpenAI-compatible 扩展 `reasoning_content`，不是 OpenAI 官方 Chat Completions 标准字段：
 
 ```text
 data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000,"model":"gpt-4o","choices":[{"index":0,"delta":{"reasoning_content":"先分析问题。"},"finish_reason":null}]}
@@ -414,13 +455,13 @@ data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000
 说明：
 
 - OpenAI 流不会输出非标准 `tool_result` 字段。
-- usage 只在最终非 `tool_calls` 的 finish chunk 返回。
-- `stream_options.include_usage` 可以被请求绑定，但当前实现只要最终 `finish` 事件中有 usage 就会写出 `usage` 字段。
+- `stream_options.include_usage=true` 时普通 chunk 带 `"usage":null`，结束前追加 `choices:[]` 的 usage chunk；未请求时省略 usage。
+- SSE 只输出 `data:` 行和 `[DONE]`，不输出额外 `id:` 行。
 - OpenAI finish reason 使用 `tool_calls`、`content_filter` 这种下划线格式。
 
 #### 非流式响应
 
-当 `stream` 为 `false` 或不传时，示例服务会聚合 `text_delta` 后返回：
+当 `stream` 为 `false` 或不传时，示例服务会聚合 text、reasoning、最终工具调用和 usage 后返回：
 
 ```json
 {
@@ -433,13 +474,23 @@ data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000
       "index": 0,
       "message": {
         "role": "assistant",
-        "content": "你好，有什么可以帮你？"
+        "content": "你好，有什么可以帮你？",
+        "reasoning_content": "先分析问题。"
       },
       "finish_reason": "stop"
     }
-  ]
+  ],
+  "usage": {
+    "prompt_tokens": 100,
+    "completion_tokens": 50,
+    "total_tokens": 150,
+    "prompt_tokens_details": {"cached_tokens":0},
+    "completion_tokens_details": {"reasoning_tokens":5}
+  }
 }
 ```
+
+自动执行完成的中间工具调用只保留在统一 session 历史中。OpenAI 请求 content parts 支持 `text`、`image_url`、`input_audio`、兼容的 `video_url` 和 `file`；非法或未知 part 会返回明确请求错误。
 
 ### 创建 run
 
@@ -465,7 +516,7 @@ POST /api/v1/sessions/:sessionId
 GET /api/v1/sessions/:sessionId
 ```
 
-响应：
+响应格式与 `/api/usechat/sessions/:sessionId` 完全相同，使用统一的 `messages[].parts`：
 
 ```json
 {
@@ -479,7 +530,8 @@ GET /api/v1/sessions/:sessionId
       "protocol": "openai",
       "model": "gpt-4o"
     }
-  }
+  },
+  "messages": []
 }
 ```
 
@@ -494,6 +546,7 @@ Query 参数：
 | 参数 | 说明 |
 | --- | --- |
 | `model` | 可选，用于 OpenAI chunk 的 `model` 字段 |
+| `include_usage` | 可选，设为 `true` 时追加最终 usage chunk |
 
 响应为 OpenAI-compatible streaming chunk，格式同 `/api/v1/chat/completions` 的流式响应。
 

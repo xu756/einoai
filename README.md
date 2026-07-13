@@ -202,7 +202,12 @@ func (h *Handler) GetAIRun(c *gin.Context) {
         return
     }
 
-    c.JSON(http.StatusOK, aisdk.NewRunResponse(run, messages))
+    response, err := aisdk.NewRunResponse(run, messages)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        return
+    }
+    c.JSON(http.StatusOK, response)
 }
 ```
 
@@ -288,7 +293,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 }
 ```
 
-查询 OpenAI 格式历史：
+查询统一 session 历史：
 
 ```go
 func (h *Handler) GetOpenAIRun(c *gin.Context) {
@@ -305,20 +310,73 @@ func (h *Handler) GetOpenAIRun(c *gin.Context) {
         return
     }
 
-    c.JSON(http.StatusOK, openai.NewRunResponse(run, messages))
+    response, err := openai.NewRunResponse(run, messages)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": err.Error()}})
+        return
+    }
+    c.JSON(http.StatusOK, response)
 }
 ```
+
+两个 session GET 端点现在返回完全相同的协议无关消息结构。每条 Eino 消息独立保留，`parts` 可以包含 `text`、`reasoning`、`image`、`audio`、`video`、`file`、`tool-call`、`tool-result` 和未知扩展 `data`：
+
+```json
+{
+  "run": {"session_id":"session_001","run_id":"run_001","status":"completed"},
+  "messages": [
+    {
+      "id": "msg_run_001_input_0",
+      "role": "user",
+      "parts": [
+        {"type":"text","text":"分析图片"},
+        {"type":"image","url":"https://example.com/a.png","media_type":"image/png"}
+      ]
+    },
+    {
+      "id": "msg_run_001_output_0",
+      "role": "assistant",
+      "parts": [
+        {"type":"reasoning","text":"先识别图片"},
+        {"type":"tool-call","tool_call_id":"call_1","tool_name":"vision","input":{"url":"https://example.com/a.png"}}
+      ]
+    },
+    {
+      "id": "msg_run_001_output_1",
+      "role": "tool",
+      "parts": [
+        {"type":"tool-result","tool_call_id":"call_1","tool_name":"vision","output":{"objects":["cat"]}}
+      ]
+    },
+    {
+      "id": "msg_run_001_output_2",
+      "role": "assistant",
+      "parts": [{"type":"text","text":"图片中有一只猫"}],
+      "finish_reason": "stop",
+      "usage": {
+        "input_tokens": 100,
+        "output_tokens": 30,
+        "total_tokens": 130,
+        "input_token_details": {"cached_tokens":20,"uncached_tokens":80},
+        "output_token_details": {"reasoning_tokens":10,"text_tokens":20}
+      }
+    }
+  ]
+}
+```
+
+这是 breaking change：session 客户端应改为渲染 `messages[].parts`。实时 AI SDK 和 OpenAI 流仍保持各自协议格式。
 
 ## 协议层边界
 
 普通 JSON 响应函数返回结构体，不依赖 Gin：
 
 - `aisdk.NewCreateRunResponse`
-- `aisdk.NewRunResponse`
+- `aisdk.NewRunResponse`（返回 `(RunResponse, error)`）
 - `aisdk.NewCancelResponse`
 - `aisdk.NewDeleteSessionResponse`
 - `openai.NewCreateRunResponse`
-- `openai.NewRunResponse`
+- `openai.NewRunResponse`（返回 `(RunResponse, error)`）
 - `openai.NewCancelResponse`
 - `openai.NewDeleteSessionResponse`
 

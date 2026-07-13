@@ -8,7 +8,7 @@
 
 - 解码 AI SDK / assistant-ui 请求体。
 - 将 `messages: UIMessage[]` 转成 Eino `[]*schema.Message`。
-- 将 Redis 中保存的 `[]*schema.Message` 转回 `[]aisdk.Message`。
+- 将 Redis 中保存的 `[]*schema.Message` 转成统一的协议无关 session 消息。
 - 将核心事件写成 AI SDK UI Message Stream。
 - 返回创建 run、查询 run、取消 run 的响应结构体。
 
@@ -84,11 +84,11 @@ type Part struct {
 messages, err := aisdk.ToSchemaMessages(req)
 ```
 
-历史从核心层返回给前端：
+session 历史从核心层返回给前端：
 
 ```go
-resp := aisdk.NewRunResponse(run, schemaMessages)
-// resp.Messages 是 []aisdk.Message
+resp, err := aisdk.NewRunResponse(run, schemaMessages)
+// resp.Messages 是 []einoai.SessionMessage
 ```
 
 转换要点：
@@ -100,7 +100,7 @@ resp := aisdk.NewRunResponse(run, schemaMessages)
 - assistant `reasoning` 转为 schema `ReasoningContent`。
 - assistant `tool-*` 转为 schema assistant `ToolCalls`。
 - `tool-*` 的 `output-available` / `output-error` 会额外生成 schema tool message。
-- schema `assistant -> tool -> assistant` 历史会合并回一个 assistant UIMessage，并用多个 `step-start` part 分段。
+- `FromSchemaMessages` 仍可用于需要 AI SDK UIMessage 的自定义展示；session GET 不调用它。
 - `id` 和 `metadata` 会保存在 schema message `Extra` 中，用于回放时还原。
 
 ## 常用函数
@@ -112,7 +112,7 @@ resp := aisdk.NewRunResponse(run, schemaMessages)
 | `ToSchemaMessages(req)` | 转换 AI SDK UIMessage 为 Eino `[]*schema.Message` |
 | `FromSchemaMessages(messages)` | 转换 Eino `[]*schema.Message` 为 `[]aisdk.Message` |
 | `NewCreateRunResponse(run)` | 构造创建 run JSON 响应结构体 |
-| `NewRunResponse(run, messages)` | 构造查询 run JSON 响应结构体，并转换 history |
+| `NewRunResponse(run, messages)` | 构造统一 session 响应，返回 `(RunResponse, error)` |
 | `NewCancelResponse()` | 构造取消 run JSON 响应结构体 |
 | `NewDeleteSessionResponse()` | 构造删除 session JSON 响应结构体 |
 | `SetEventStreamHeaders(header)` | 设置 AI SDK SSE 响应头 |
@@ -180,9 +180,16 @@ func (h *Handler) GetAIRun(c *gin.Context) {
         return
     }
 
-    c.JSON(http.StatusOK, aisdk.NewRunResponse(run, messages))
+    response, err := aisdk.NewRunResponse(run, messages)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        return
+    }
+    c.JSON(http.StatusOK, response)
 }
 ```
+
+session GET 返回协议无关的 `messages[].parts`，与 OpenAI session 端点完全相同。它不再返回合并后的 AI SDK `UIMessage` 历史；text、reasoning、工具调用/结果、多模态和 usage 都按原始 Eino 消息顺序独立保留。这是 breaking change，实时 UI Message Stream 不受影响。
 
 订阅事件：
 
@@ -288,7 +295,7 @@ data: {"type":"tool-output-available","toolCallId":"call_001","output":{"tempera
 
 - `toolName` 和 `toolCallId` 来自 Eino tool call，不生成 `toolName: "tool"` 之类的兜底值。
 - `finish-step` 当前只输出 `type`。
-- usage 会在最终 `finish.messageMetadata.custom.usage` 中返回；历史消息回放时，assistant message 的 `metadata.custom.usage` 也会保留同样的结构。
+- usage 会在最终 `finish.messageMetadata.custom.usage` 中返回；session 历史则使用统一消息的顶层 `usage` 结构。
 - `tool_calls`、`content_filter` 会输出为 AI SDK 的 `tool-calls`、`content-filter`。
 - 当前订阅直接订阅指定 `runID`，不读取 `Last-Event-ID`。
 
