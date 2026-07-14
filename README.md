@@ -382,6 +382,12 @@ func (h *Handler) GetOpenAIRun(c *gin.Context) {
 
 `writer` 只需要实现 `io.Writer`，`flush` 是可选的 `func()`。Hertz、net/http、fasthttp 或自定义网关都可以用这组函数自己集成 SSE。
 
+流连接取消语义：
+
+- 客户端触发的 `context.Canceled` 视为正常断开，不输出错误 SSE，也不再尝试写入 `[DONE]`。
+- `context.DeadlineExceeded`、Redis 错误和其他真实 stream 错误仍会正常返回并保持可观测。
+- 如果取消发生时 Redis `XREAD` 已经进入阻塞等待，服务配置的 `redisotel` hook 仍可能把该命令记录为 error span；`einoai` 会阻止取消后的新 `XREAD`，但不会修改业务服务的 tracing 配置。
+
 ## 运行示例服务
 
 示例服务位于 `cmd/server`：

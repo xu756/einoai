@@ -295,6 +295,9 @@ data: {"type":"tool-output-available","toolCallId":"call_001","output":{"tempera
 - usage 会在最终 `finish.messageMetadata.custom.usage` 中返回；session 历史则使用统一消息的顶层 `usage` 结构。
 - `tool_calls`、`content_filter` 会输出为 AI SDK 的 `tool-calls`、`content-filter`。
 - 当前订阅直接订阅指定 `runID`，不读取 `Last-Event-ID`。
+- 客户端触发的 `context.Canceled` 视为正常断开，不输出错误 SSE，也不再尝试写入 `[DONE]`。
+- `context.DeadlineExceeded`、Redis 错误和其他真实 stream 错误仍会返回错误。
+- 如果取消发生时 Redis `XREAD` 已经阻塞，服务配置的 `redisotel` hook 仍可能记录 error span；`einoai` 只负责阻止取消后的新 `XREAD`，不修改业务服务 tracing 配置。
 
 ## 错误格式
 

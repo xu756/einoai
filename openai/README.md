@@ -284,6 +284,9 @@ data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1780560000
 - 未请求 usage 时 chunk 不包含 `usage`；请求后普通 chunk 为 `"usage":null`。
 - SSE 只输出 `data:` 行和最终 `[DONE]`，不额外输出 SSE `id:` 行。
 - finish reason 使用 OpenAI 的 `tool_calls`、`content_filter` 下划线格式。
+- 客户端触发的 `context.Canceled` 视为正常断开，不输出错误 SSE，也不再尝试写入 `[DONE]`。
+- `context.DeadlineExceeded`、Redis 错误和其他真实 stream 错误仍会返回错误。
+- 如果取消发生时 Redis `XREAD` 已经阻塞，服务配置的 `redisotel` hook 仍可能记录 error span；`einoai` 只负责阻止取消后的新 `XREAD`，不修改业务服务 tracing 配置。
 
 ## 非流式输出
 
