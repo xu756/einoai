@@ -36,15 +36,11 @@ func (a *app) openAICompletions(c *gin.Context) {
 		return
 	}
 
-	run, err := a.svc.CreateRun(c.Request.Context(), einoai.CreateRunRequest{
-		SessionID: openai.ResolveSessionID(req, c.GetHeader("X-Session-ID"), c.Query("sessionId")),
-		Messages:  messages,
-		Agent:     agent,
-		Metadata: map[string]any{
-			"protocol": "openai",
-			"model":    req.Model,
-		},
-	})
+	run, err := a.svc.CreateRun(c.Request.Context(), newAgentRunRequest(
+		openai.ResolveSessionID(req, c.GetHeader("X-Session-ID"), c.Query("sessionId")),
+		messages,
+		agent,
+	))
 	if err != nil {
 		writeOpenAIError(c, err)
 		return
@@ -93,15 +89,11 @@ func (a *app) createOpenAIRun(c *gin.Context) {
 		return
 	}
 
-	run, err := a.svc.CreateRun(c.Request.Context(), einoai.CreateRunRequest{
-		SessionID: sessionID,
-		Messages:  messages,
-		Agent:     agent,
-		Metadata: map[string]any{
-			"protocol": "openai",
-			"model":    req.Model,
-		},
-	})
+	run, err := a.svc.CreateRun(c.Request.Context(), newAgentRunRequest(
+		sessionID,
+		messages,
+		agent,
+	))
 	if err != nil {
 		writeOpenAIError(c, err)
 		return

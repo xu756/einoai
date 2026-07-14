@@ -34,16 +34,11 @@ func (a *app) aiCompletions(c *gin.Context) {
 		writeAIError(c, err)
 		return
 	}
-	run, err := a.svc.CreateRun(c.Request.Context(), einoai.CreateRunRequest{
-		SessionID: "usechat-completions",
-		Messages:  messages,
-		Agent:     agent,
-		Metadata: map[string]any{
-			"protocol": "aisdk",
-			"model":    req.Model,
-			"params":   req.Params,
-		},
-	})
+	run, err := a.svc.CreateRun(c.Request.Context(), newAgentRunRequest(
+		"usechat-completions",
+		messages,
+		agent,
+	))
 	if err != nil {
 		writeAIError(c, err)
 		return
@@ -82,16 +77,11 @@ func (a *app) createAIRun(c *gin.Context) {
 		return
 	}
 
-	run, err := a.svc.CreateRun(c.Request.Context(), einoai.CreateRunRequest{
-		SessionID: sessionID,
-		Messages:  messages,
-		Agent:     agent,
-		Metadata: map[string]any{
-			"protocol": "aisdk",
-			"model":    req.Model,
-			"params":   req.Params,
-		},
-	})
+	run, err := a.svc.CreateRun(c.Request.Context(), newAgentRunRequest(
+		sessionID,
+		messages,
+		agent,
+	))
 	if err != nil {
 		writeAIError(c, err)
 		return
