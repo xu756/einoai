@@ -170,11 +170,6 @@ func (h *Handler) CreateAIRun(c *gin.Context) {
         SessionID: sessionID,
         Messages:  messages,
         Agent:     agent,
-        Metadata: map[string]any{
-            "protocol": "aisdk",
-            "model":    req.Model,
-            "params":   req.Params,
-        },
     })
     if err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -258,10 +253,6 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
         SessionID: openai.ResolveSessionID(req, c.GetHeader("X-Session-ID"), c.Query("sessionId")),
         Messages:  messages,
         Agent:     agent,
-        Metadata: map[string]any{
-            "protocol": "openai",
-            "model":    req.Model,
-        },
     })
     if err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": err.Error()}})
@@ -292,6 +283,8 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
     c.JSON(http.StatusOK, body)
 }
 ```
+
+示例服务不会把请求中的 `model`、协议名称或 AI SDK `params` 复制到 run metadata。Eino 模型只由已配置的 agent 决定；OpenAI `model` 仍作为响应 chunk 和默认 session ID 的协议字段使用。
 
 查询统一 session 历史：
 

@@ -148,11 +148,6 @@ func (h *Handler) CreateAIRun(c *gin.Context) {
         SessionID: sessionID,
         Messages:  messages,
         Agent:     agent,
-        Metadata: map[string]any{
-            "protocol": "aisdk",
-            "model":    req.Model,
-            "params":   req.Params,
-        },
     })
     if err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -162,6 +157,8 @@ func (h *Handler) CreateAIRun(c *gin.Context) {
     c.JSON(http.StatusAccepted, aisdk.NewCreateRunResponse(run))
 }
 ```
+
+示例 server 不会把 AI SDK 请求的 `model` 或 `params` 写入 run metadata。Eino 模型只由传入 `Agent` 的配置决定。
 
 查询 run 和历史消息：
 

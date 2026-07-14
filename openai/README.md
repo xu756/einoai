@@ -139,10 +139,6 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
         SessionID: openai.ResolveSessionID(req, c.GetHeader("X-Session-ID"), c.Query("sessionId")),
         Messages:  messages,
         Agent:     agent,
-        Metadata: map[string]any{
-            "protocol": "openai",
-            "model":    req.Model,
-        },
     })
     if err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": err.Error()}})
@@ -173,6 +169,8 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
     c.JSON(http.StatusOK, body)
 }
 ```
+
+示例 server 不会把 OpenAI 请求的 `model` 或协议名称写入 run metadata。Eino 模型只由传入 `Agent` 的配置决定；`model` 仍用于 OpenAI 响应 chunk 和默认 session ID。
 
 非 Gin 框架也是同一组通用 writer：
 
