@@ -31,6 +31,16 @@ func (s *sliceEventStream) Close() error {
 	return nil
 }
 
+type canceledEventStream struct{}
+
+func (*canceledEventStream) Next(context.Context) (*einoai.RunEvent, error) {
+	return nil, context.Canceled
+}
+
+func (*canceledEventStream) Close() error {
+	return nil
+}
+
 func TestWriteChatCompletionStreamWritesStandardToolCallDeltas(t *testing.T) {
 	var buf bytes.Buffer
 
@@ -311,6 +321,24 @@ func TestConvertUsagePreservesNormalizedDetails(t *testing.T) {
 	})
 	if got.PromptTokensDetails.CachedTokens != 5 || got.CompletionTokensDetails.ReasoningTokens != 4 {
 		t.Fatalf("detail counts were lost: %#v", got)
+	}
+}
+
+func TestWriteChatCompletionStreamTreatsContextCancellationAsClientDisconnect(t *testing.T) {
+	var buf bytes.Buffer
+	err := WriteChatCompletionStreamTo(
+		context.Background(),
+		&buf,
+		nil,
+		ChatCompletionsRequest{Model: "gpt-4o", Stream: true},
+		&canceledEventStream{},
+	)
+	if err != nil {
+		t.Fatalf("client cancellation must not be a stream error: %v", err)
+	}
+	body := buf.String()
+	if strings.Contains(body, `"error"`) || strings.Contains(body, "[DONE]") {
+		t.Fatalf("canceled client received terminal error data: %s", body)
 	}
 }
 

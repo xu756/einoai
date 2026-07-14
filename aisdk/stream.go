@@ -3,6 +3,7 @@ package aisdk
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -50,6 +51,9 @@ func WriteEventStreamTo(ctx context.Context, writer io.Writer, flush FlushFunc, 
 		ev, err := stream.Next(ctx)
 		if err == io.EOF {
 			return out.writeDone()
+		}
+		if errors.Is(err, context.Canceled) {
+			return nil
 		}
 		if err != nil {
 			_ = out.writeStreamError(err)

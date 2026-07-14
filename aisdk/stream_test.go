@@ -138,6 +138,17 @@ func TestWriteEventStreamOrdersReasoningToolsAndFinalUsage(t *testing.T) {
 	}
 }
 
+func TestWriteEventStreamTreatsContextCancellationAsClientDisconnect(t *testing.T) {
+	var buf bytes.Buffer
+	err := WriteEventStreamTo(context.Background(), &buf, nil, &canceledEventStream{})
+	if err != nil {
+		t.Fatalf("client cancellation must not be a stream error: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("canceled client must not receive error or DONE data: %q", buf.String())
+	}
+}
+
 type aisdkSliceEventStream struct {
 	events []*einoai.RunEvent
 	index  int
@@ -153,5 +164,15 @@ func (s *aisdkSliceEventStream) Next(context.Context) (*einoai.RunEvent, error) 
 }
 
 func (s *aisdkSliceEventStream) Close() error {
+	return nil
+}
+
+type canceledEventStream struct{}
+
+func (*canceledEventStream) Next(context.Context) (*einoai.RunEvent, error) {
+	return nil, context.Canceled
+}
+
+func (*canceledEventStream) Close() error {
 	return nil
 }
