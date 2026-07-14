@@ -20,6 +20,9 @@ func (s *redisEventStream) Next(ctx context.Context) (*RunEvent, error) {
 	}
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		events, err := s.store.readAfter(ctx, s.sessionID, s.runID, s.lastID, 15*time.Second, 1)
 		if err != nil {
 			return nil, err
@@ -35,9 +38,6 @@ func (s *redisEventStream) Next(ctx context.Context) (*RunEvent, error) {
 		}
 		if run == nil || isTerminalRunStatus(run.Status) {
 			return nil, io.EOF
-		}
-		if err := ctx.Err(); err != nil {
-			return nil, err
 		}
 	}
 }
