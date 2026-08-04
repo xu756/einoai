@@ -6,10 +6,11 @@ import (
 	"github.com/xu756/einoai"
 )
 
-func newAgentRunRequest(sessionID string, messages []*schema.Message, agent adk.Agent) einoai.CreateRunRequest {
+func newAgentRunRequest(sessionID string, messages []*schema.Message, agent adk.Agent, onCompleted einoai.OnRunCompleted) einoai.CreateRunRequest {
 	return einoai.CreateRunRequest{
-		SessionID: sessionID,
-		Messages:  messages,
-		Agent:     agent,
+		SessionID:   sessionID,
+		Messages:    messages,
+		Agent:       agent,
+		OnCompleted: onCompleted,
 	}
 }

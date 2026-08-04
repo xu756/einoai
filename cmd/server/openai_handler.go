@@ -40,6 +40,7 @@ func (a *app) openAICompletions(c *gin.Context) {
 		openai.ResolveSessionID(req, c.GetHeader("X-Session-ID"), c.Query("sessionId")),
 		messages,
 		agent,
+		a.onRunCompleted,
 	))
 	if err != nil {
 		writeOpenAIError(c, err)
@@ -93,6 +94,7 @@ func (a *app) createOpenAIRun(c *gin.Context) {
 		sessionID,
 		messages,
 		agent,
+		a.onRunCompleted,
 	))
 	if err != nil {
 		writeOpenAIError(c, err)
@@ -108,17 +110,7 @@ func (a *app) getOpenAIRun(c *gin.Context) {
 		writeOpenAIError(c, err)
 		return
 	}
-	messages, err := a.svc.GetMessages(c.Request.Context(), sessionID)
-	if err != nil {
-		writeOpenAIError(c, err)
-		return
-	}
-	response, err := openai.NewRunResponse(run, messages)
-	if err != nil {
-		writeOpenAIError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, response)
+	c.JSON(http.StatusOK, openai.NewRunResponse(run))
 }
 
 func (a *app) subscribeOpenAIEvents(c *gin.Context) {

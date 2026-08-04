@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/cloudwego/eino/schema"
 	"github.com/xu756/einoai"
 	"github.com/xu756/einoai/aisdk"
 	"github.com/xu756/einoai/openai"
@@ -13,15 +12,8 @@ import (
 
 func TestRunResponsesAreEqual(t *testing.T) {
 	run := &einoai.RunInfo{SessionID: "s1", RunID: "r1", Status: einoai.RunStatusCompleted}
-	history := []*schema.Message{{Role: schema.Assistant, ReasoningContent: "think", Content: "answer"}}
-	aiResponse, err := aisdk.NewRunResponse(run, history)
-	if err != nil {
-		t.Fatal(err)
-	}
-	openAIResponse, err := openai.NewRunResponse(run, history)
-	if err != nil {
-		t.Fatal(err)
-	}
+	aiResponse := aisdk.NewRunResponse(run)
+	openAIResponse := openai.NewRunResponse(run)
 	aiJSON, err := json.Marshal(aiResponse)
 	if err != nil {
 		t.Fatal(err)

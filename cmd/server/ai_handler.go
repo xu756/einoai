@@ -38,6 +38,7 @@ func (a *app) aiCompletions(c *gin.Context) {
 		"usechat-completions",
 		messages,
 		agent,
+		a.onRunCompleted,
 	))
 	if err != nil {
 		writeAIError(c, err)
@@ -81,6 +82,7 @@ func (a *app) createAIRun(c *gin.Context) {
 		sessionID,
 		messages,
 		agent,
+		a.onRunCompleted,
 	))
 	if err != nil {
 		writeAIError(c, err)
@@ -97,17 +99,7 @@ func (a *app) getAIRun(c *gin.Context) {
 		writeAIError(c, err)
 		return
 	}
-	messages, err := a.svc.GetMessages(c.Request.Context(), sessionID)
-	if err != nil {
-		writeAIError(c, err)
-		return
-	}
-	response, err := aisdk.NewRunResponse(run, messages)
-	if err != nil {
-		writeAIError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, response)
+	c.JSON(http.StatusOK, aisdk.NewRunResponse(run))
 }
 
 func (a *app) subscribeAIEvents(c *gin.Context) {

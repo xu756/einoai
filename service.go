@@ -18,17 +18,19 @@ import (
 var errSessionDeleted = errors.New("session deleted")
 
 type service struct {
-	store       *redisStore
-	runMu       sync.Mutex
-	runCancels  map[string]context.CancelFunc
-	deletedRuns map[string]struct{}
+	store               *redisStore
+	completionErrorHook CompletionErrorHandler
+	runMu               sync.Mutex
+	runCancels          map[string]context.CancelFunc
+	deletedRuns         map[string]struct{}
 }
 
 func newService(db *redis.Client, opts serviceOptions) *service {
 	return &service{
-		store:       newRedisStore(db, opts.redisTTL),
-		runCancels:  make(map[string]context.CancelFunc),
-		deletedRuns: make(map[string]struct{}),
+		store:               newRedisStore(db, opts.redisTTL),
+		completionErrorHook: opts.completionErrorHook,
+		runCancels:          make(map[string]context.CancelFunc),
+		deletedRuns:         make(map[string]struct{}),
 	}
 }
 
@@ -63,11 +65,7 @@ func (s *service) CreateRun(ctx context.Context, req CreateRunRequest) (*RunInfo
 		Metadata:  req.Metadata,
 	}
 	assignSessionMessageIDs(snapshotMessages, run.RunID, "input")
-	runMessages := append([]*schema.Message{}, snapshotMessages...)
 	if err := s.store.initRun(ctx, run); err != nil {
-		return nil, err
-	}
-	if err := s.store.setActiveMessages(ctx, run.SessionID, run.RunID, snapshotMessages); err != nil {
 		return nil, err
 	}
 	if _, err := s.appendEvent(context.Background(), run.SessionID, run.RunID, EventRunCreated, nil); err != nil {
@@ -76,7 +74,7 @@ func (s *service) CreateRun(ctx context.Context, req CreateRunRequest) (*RunInfo
 
 	runCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	s.registerRunCancel(run.RunID, cancel)
-	go s.executeRun(runCtx, cancel, run.SessionID, run.RunID, runMessages, req.Agent)
+	go s.executeRun(runCtx, cancel, run, snapshotMessages, req.Agent, req.OnCompleted)
 
 	return run, nil
 }
@@ -106,25 +104,6 @@ func requestSnapshotMessages(messages []*schema.Message) ([]*schema.Message, err
 		}
 	}
 	return append([]*schema.Message{}, messages...), nil
-}
-
-func (s *service) GetMessages(ctx context.Context, sessionID string) ([]*schema.Message, error) {
-	messages, err := s.store.getSessionMessages(ctx, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	run, err := s.GetRun(ctx, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	if run == nil {
-		return messages, nil
-	}
-	active, err := s.store.getActiveMessages(ctx, sessionID, run.RunID)
-	if err != nil {
-		return nil, err
-	}
-	return active, nil
 }
 
 func (s *service) DeleteSession(ctx context.Context, sessionID string) error {
@@ -165,9 +144,6 @@ func (s *service) CancelRun(ctx context.Context, sessionID string, runID string)
 	if err := s.appendFinish(ctx, sessionID, runID, "cancelled", nil); err != nil {
 		return err
 	}
-	if err := s.store.commitRunMessages(ctx, sessionID, runID, nil); err != nil {
-		return err
-	}
 	if err := s.store.setRunStatus(ctx, sessionID, runID, RunStatusCancelled, ""); err != nil {
 		return err
 	}
@@ -196,9 +172,10 @@ func (s *service) SubscribeEvents(ctx context.Context, req SubscribeRequest) (Ev
 	}, nil
 }
 
-func (s *service) executeRun(ctx context.Context, cancel context.CancelFunc, sessionID, runID string, messages []*schema.Message, agent adk.Agent) {
+func (s *service) executeRun(ctx context.Context, cancel context.CancelFunc, run *RunInfo, messages []*schema.Message, agent adk.Agent, onCompleted OnRunCompleted) {
 	defer cancel()
-	defer s.unregisterRunCancel(runID)
+	defer s.unregisterRunCancel(run.RunID)
+	sessionID, runID := run.SessionID, run.RunID
 
 	if s.isRunDeleted(runID) {
 		return
@@ -234,7 +211,6 @@ func (s *service) executeRun(ctx context.Context, cancel context.CancelFunc, ses
 			}
 			_ = state.closeOpenBlocks(context.Background())
 			_ = s.appendFinish(context.Background(), sessionID, runID, "cancelled", nil)
-			_ = s.store.commitRunMessages(context.Background(), sessionID, runID, nil)
 			_ = s.store.setRunStatus(context.Background(), sessionID, runID, RunStatusCancelled, "")
 			_ = s.store.clearCurrentRunIfMatches(context.Background(), sessionID, runID)
 			return
@@ -242,7 +218,6 @@ func (s *service) executeRun(ctx context.Context, cancel context.CancelFunc, ses
 		_ = state.closeOpenBlocks(context.Background())
 		_, _ = s.appendEvent(context.Background(), sessionID, runID, EventError, ErrorData{Message: err.Error()})
 		_ = s.appendFinish(context.Background(), sessionID, runID, "error", nil)
-		_ = s.store.commitRunMessages(context.Background(), sessionID, runID, nil)
 		_ = s.store.setRunStatus(context.Background(), sessionID, runID, RunStatusFailed, err.Error())
 		_ = s.store.clearCurrentRunIfMatches(context.Background(), sessionID, runID)
 		return
@@ -259,9 +234,36 @@ func (s *service) executeRun(ctx context.Context, cancel context.CancelFunc, ses
 		_ = s.store.deleteSession(context.Background(), sessionID)
 		return
 	}
-	_ = s.store.commitRunMessages(context.Background(), sessionID, runID, state.outputMessages)
 	_ = s.store.setRunStatus(context.Background(), sessionID, runID, RunStatusCompleted, "")
 	_ = s.store.clearCurrentRunIfMatches(context.Background(), sessionID, runID)
+	run.Status = RunStatusCompleted
+	run.UpdatedAt = time.Now()
+	result := &RunResult{
+		Run:      run,
+		Input:    messages,
+		Output:   state.outputMessages,
+		Messages: append(append([]*schema.Message{}, messages...), state.outputMessages...),
+		Usage:    state.usage,
+	}
+	s.invokeCompletionHook(sessionID, runID, onCompleted, result)
+}
+
+func (s *service) invokeCompletionHook(sessionID, runID string, hook OnRunCompleted, result *RunResult) {
+	if hook == nil {
+		return
+	}
+	var hookErr error
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				hookErr = fmt.Errorf("completion hook panic: %v", recovered)
+			}
+		}()
+		hookErr = hook(context.Background(), result)
+	}()
+	if hookErr != nil && s.completionErrorHook != nil {
+		s.completionErrorHook(context.Background(), sessionID, runID, hookErr)
+	}
 }
 
 func (s *service) streamAgentEvents(ctx context.Context, iter *adk.AsyncIterator[*adk.AgentEvent], state *runEventBuilder) error {

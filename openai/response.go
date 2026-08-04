@@ -1,7 +1,6 @@
 package openai
 
 import (
-	"github.com/cloudwego/eino/schema"
 	"github.com/xu756/einoai"
 )
 
@@ -12,8 +11,10 @@ type CreateRunResponse struct {
 	Status    einoai.RunStatus `json:"status"`
 }
 
-// RunResponse is the protocol-neutral get-run response shape.
-type RunResponse = einoai.SessionRunResponse
+// RunResponse is the run status response. Session history is application-owned.
+type RunResponse struct {
+	Run *einoai.RunInfo `json:"run"`
+}
 
 // CancelResponse is the default OpenAI-compatible cancel response shape.
 type CancelResponse struct {
@@ -38,8 +39,8 @@ func NewCreateRunResponse(run *einoai.RunInfo) CreateRunResponse {
 }
 
 // NewRunResponse converts stored schema messages into OpenAI chat messages.
-func NewRunResponse(run *einoai.RunInfo, messages []*schema.Message) (RunResponse, error) {
-	return einoai.NewSessionRunResponse(run, messages)
+func NewRunResponse(run *einoai.RunInfo) RunResponse {
+	return RunResponse{Run: run}
 }
 
 // NewCancelResponse returns a successful cancel response struct.

@@ -28,6 +28,13 @@ type app struct {
 	svc   einoai.Service
 }
 
+// onRunCompleted is the application-owned history persistence seam.
+// Replace this sample log with the application's repository write.
+func (a *app) onRunCompleted(_ context.Context, result *einoai.RunResult) error {
+	log.Printf("run completed session=%s run=%s messages=%d", result.Run.SessionID, result.Run.RunID, len(result.Messages))
+	return nil
+}
+
 func main() {
 	_ = godotenv.Load()
 

@@ -115,14 +115,7 @@ func TestRunEventBuilderPreservesUsageOnCommittedAssistantMessage(t *testing.T) 
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.commitRunMessages(ctx, "s1", "r1", builder.outputMessages); err != nil {
-		t.Fatal(err)
-	}
-
-	messages, err := store.getSessionMessages(ctx, "s1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	messages := builder.outputMessages
 	if len(messages) != 1 {
 		t.Fatalf("expected committed assistant message, got %#v", messages)
 	}

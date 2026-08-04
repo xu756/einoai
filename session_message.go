@@ -10,7 +10,9 @@ import (
 
 const sessionMessageIDExtraKey = "_einoai_message_id"
 
-// SessionRunResponse is the protocol-neutral session history response.
+// SessionRunResponse is an optional protocol-neutral history conversion helper.
+// The core service does not persist or query this history; applications may use
+// it when exposing their own history endpoint.
 type SessionRunResponse struct {
 	Run      *RunInfo         `json:"run"`
 	Messages []SessionMessage `json:"messages"`

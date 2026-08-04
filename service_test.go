@@ -22,6 +22,30 @@ func TestNewServiceAcceptsRedisTTLOption(t *testing.T) {
 	}
 }
 
+func TestNewServiceAcceptsCompletionErrorHandler(t *testing.T) {
+	called := false
+	svc := NewService(nil, WithCompletionErrorHandler(func(_ context.Context, sessionID, runID string, err error) {
+		called = sessionID == "s1" && runID == "r1" && err != nil
+	})).(*service)
+	svc.invokeCompletionHook("s1", "r1", func(context.Context, *RunResult) error {
+		return context.Canceled
+	}, &RunResult{})
+	if !called {
+		t.Fatal("completion error handler was not called")
+	}
+}
+
+func TestCompletionHookPanicIsReported(t *testing.T) {
+	var got error
+	svc := &service{completionErrorHook: func(_ context.Context, _, _ string, err error) { got = err }}
+	svc.invokeCompletionHook("s1", "r1", func(context.Context, *RunResult) error {
+		panic("boom")
+	}, &RunResult{})
+	if got == nil {
+		t.Fatal("expected panic to be reported as hook error")
+	}
+}
+
 func TestServiceGetRunHidesTerminalCurrentRun(t *testing.T) {
 	store, cleanup := newTestRedisStore(t)
 	defer cleanup()
@@ -128,61 +152,15 @@ func TestAssignSessionMessageIDsPreservesExistingIDs(t *testing.T) {
 	}
 }
 
-func TestServiceGetMessagesReturnsActiveSnapshotWhenRunIsActive(t *testing.T) {
+func TestServiceDeleteSessionRemovesRunArtifacts(t *testing.T) {
 	store, cleanup := newTestRedisStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
-	if err := store.replaceSessionMessages(ctx, "s1", []*schema.Message{
-		{Role: schema.User, Content: "hello"},
-		{Role: schema.Assistant, Content: "hi"},
-	}); err != nil {
-		t.Fatal(err)
-	}
 	run := &RunInfo{SessionID: "s1", RunID: "r1", Status: RunStatusRunning}
 	if err := store.initRun(ctx, run); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.setActiveMessages(ctx, "s1", "r1", []*schema.Message{
-		{Role: schema.User, Content: "edited"},
-		{Role: schema.User, Content: "current"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	svc := &service{store: store}
-	messages, err := svc.GetMessages(ctx, "s1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(messages) != 2 {
-		t.Fatalf("expected active request snapshot, got %#v", messages)
-	}
-	if messages[0].Content != "edited" || messages[1].Content != "current" {
-		t.Fatalf("expected active snapshot to replace committed history, got %#v", messages)
-	}
-}
-
-func TestServiceDeleteSessionRemovesMessagesAndCurrentRun(t *testing.T) {
-	store, cleanup := newTestRedisStore(t)
-	defer cleanup()
-
-	ctx := context.Background()
-	if err := store.replaceSessionMessages(ctx, "s1", []*schema.Message{
-		{Role: schema.User, Content: "hello"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	run := &RunInfo{SessionID: "s1", RunID: "r1", Status: RunStatusRunning}
-	if err := store.initRun(ctx, run); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.setActiveMessages(ctx, "s1", "r1", []*schema.Message{
-		{Role: schema.User, Content: "active"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
 	svc := &service{
 		store:       store,
 		runCancels:  make(map[string]context.CancelFunc),
@@ -192,56 +170,11 @@ func TestServiceDeleteSessionRemovesMessagesAndCurrentRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	messages, err := svc.GetMessages(ctx, "s1")
+	deletedRun, err := svc.GetRun(ctx, "s1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 0 {
-		t.Fatalf("expected deleted session messages to be empty, got %#v", messages)
-	}
-	run, err = svc.GetRun(ctx, "s1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if run != nil {
-		t.Fatalf("expected deleted session run to be empty, got %#v", run)
-	}
-}
-
-func TestCommitRunMessagesReplacesHistoryWithActiveSnapshotAndOutput(t *testing.T) {
-	store, cleanup := newTestRedisStore(t)
-	defer cleanup()
-
-	ctx := context.Background()
-	if err := store.replaceSessionMessages(ctx, "s1", []*schema.Message{
-		{Role: schema.User, Content: "old branch"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	run := &RunInfo{SessionID: "s1", RunID: "r1", Status: RunStatusRunning}
-	if err := store.initRun(ctx, run); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.setActiveMessages(ctx, "s1", "r1", []*schema.Message{
-		{Role: schema.User, Content: "edited branch"},
-		{Role: schema.User, Content: "current"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.commitRunMessages(ctx, "s1", "r1", []*schema.Message{
-		{Role: schema.Assistant, Content: "answer"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	messages, err := store.getSessionMessages(ctx, "s1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(messages) != 3 {
-		t.Fatalf("expected active snapshot plus output, got %#v", messages)
-	}
-	if messages[0].Content != "edited branch" || messages[2].Content != "answer" {
-		t.Fatalf("expected committed history to be replaced, got %#v", messages)
+	if deletedRun != nil {
+		t.Fatalf("expected deleted session run to be empty, got %#v", deletedRun)
 	}
 }

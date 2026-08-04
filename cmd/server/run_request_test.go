@@ -6,6 +6,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
+	"github.com/xu756/einoai"
 )
 
 type runRequestTestAgent struct{}
@@ -29,8 +30,9 @@ func (*runRequestTestAgent) Run(
 func TestNewAgentRunRequestContainsOnlyAgentInputs(t *testing.T) {
 	agent := &runRequestTestAgent{}
 	messages := []*schema.Message{{Role: schema.User, Content: "hello"}}
+	hook := func(context.Context, *einoai.RunResult) error { return nil }
 
-	got := newAgentRunRequest("session_1", messages, agent)
+	got := newAgentRunRequest("session_1", messages, agent, hook)
 
 	if got.SessionID != "session_1" {
 		t.Fatalf("unexpected session ID: %q", got.SessionID)
@@ -40,6 +42,9 @@ func TestNewAgentRunRequestContainsOnlyAgentInputs(t *testing.T) {
 	}
 	if got.Agent != agent {
 		t.Fatalf("agent was not preserved: %#v", got.Agent)
+	}
+	if got.OnCompleted == nil {
+		t.Fatal("completion hook was not preserved")
 	}
 	if got.Metadata != nil {
 		t.Fatalf("handler metadata must be nil: %#v", got.Metadata)

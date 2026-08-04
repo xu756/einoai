@@ -2,6 +2,7 @@ package einoai
 
 import (
 	"context"
+	"log"
 	"time"
 
 	"github.com/cloudwego/eino/adk"
@@ -10,7 +11,7 @@ import (
 )
 
 const (
-	// DefaultRedisTTL is the default expiration for Redis-backed run and message keys.
+	// DefaultRedisTTL is the default expiration for Redis-backed run and event keys.
 	DefaultRedisTTL = 7 * 24 * time.Hour
 )
 
@@ -27,11 +28,27 @@ const (
 
 // CreateRunRequest starts an agent run for a session.
 type CreateRunRequest struct {
-	SessionID string
-	Messages  []*schema.Message
-	Agent     adk.Agent
-	Metadata  map[string]any
+	SessionID   string
+	Messages    []*schema.Message
+	Agent       adk.Agent
+	Metadata    map[string]any
+	OnCompleted OnRunCompleted
 }
+
+// RunResult contains the complete result of a successfully completed run.
+type RunResult struct {
+	Run      *RunInfo
+	Input    []*schema.Message
+	Output   []*schema.Message
+	Messages []*schema.Message
+	Usage    *schema.TokenUsage
+}
+
+// OnRunCompleted receives a successfully completed run and its complete messages.
+type OnRunCompleted func(context.Context, *RunResult) error
+
+// CompletionErrorHandler observes errors returned or panics raised by OnRunCompleted.
+type CompletionErrorHandler func(context.Context, string, string, error)
 
 // SubscribeRequest opens a persisted event stream for a run.
 type SubscribeRequest struct {
@@ -54,20 +71,20 @@ type RunInfo struct {
 type Service interface {
 	CreateRun(ctx context.Context, req CreateRunRequest) (*RunInfo, error)
 	GetRun(ctx context.Context, sessionID string) (*RunInfo, error)
-	GetMessages(ctx context.Context, sessionID string) ([]*schema.Message, error)
 	DeleteSession(ctx context.Context, sessionID string) error
 	CancelRun(ctx context.Context, sessionID string, runID string) error
 	SubscribeEvents(ctx context.Context, req SubscribeRequest) (EventStream, error)
 }
 
 type serviceOptions struct {
-	redisTTL time.Duration
+	redisTTL            time.Duration
+	completionErrorHook CompletionErrorHandler
 }
 
 // ServiceOption configures the core einoai service.
 type ServiceOption func(*serviceOptions)
 
-// WithRedisTTL configures expiration for Redis-backed run and message keys.
+// WithRedisTTL configures expiration for Redis-backed run and event keys.
 //
 // A ttl <= 0 disables expiration for keys written by the service.
 func WithRedisTTL(ttl time.Duration) ServiceOption {
@@ -76,9 +93,19 @@ func WithRedisTTL(ttl time.Duration) ServiceOption {
 	}
 }
 
+// WithCompletionErrorHandler configures observation of completion hook failures.
+func WithCompletionErrorHandler(handler CompletionErrorHandler) ServiceOption {
+	return func(opts *serviceOptions) {
+		opts.completionErrorHook = handler
+	}
+}
+
 func defaultServiceOptions() serviceOptions {
 	return serviceOptions{
 		redisTTL: DefaultRedisTTL,
+		completionErrorHook: func(_ context.Context, sessionID, runID string, err error) {
+			log.Printf("einoai completion hook failed session=%s run=%s: %v", sessionID, runID, err)
+		},
 	}
 }
 

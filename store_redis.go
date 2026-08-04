@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/cloudwego/eino/schema"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -36,14 +35,6 @@ func runMetaKey(sessionID, runID string) string {
 
 func currentRunKey(sessionID string) string {
 	return fmt.Sprintf("chat:sessions:%s:current_run", sessionID)
-}
-
-func sessionMessagesKey(sessionID string) string {
-	return fmt.Sprintf("chat:sessions:%s:messages", sessionID)
-}
-
-func activeMessagesKey(sessionID, runID string) string {
-	return fmt.Sprintf("chat:sessions:%s:runs:%s:active_messages", sessionID, runID)
 }
 
 func sessionKeysPattern(sessionID string) string {
@@ -129,86 +120,6 @@ func (s *redisStore) getCurrentRun(ctx context.Context, sessionID string) (*RunI
 		_ = s.rdb.Del(ctx, currentRunKey(sessionID)).Err()
 	}
 	return run, nil
-}
-
-func (s *redisStore) getSessionMessages(ctx context.Context, sessionID string) ([]*schema.Message, error) {
-	values, err := s.rdb.LRange(ctx, sessionMessagesKey(sessionID), 0, -1).Result()
-	if err != nil {
-		return nil, err
-	}
-	messages := make([]*schema.Message, 0, len(values))
-	for _, value := range values {
-		var msg schema.Message
-		if err := json.Unmarshal([]byte(value), &msg); err != nil {
-			return nil, fmt.Errorf("unmarshal session message: %w", err)
-		}
-		messages = append(messages, &msg)
-	}
-	return messages, nil
-}
-
-func (s *redisStore) setActiveMessages(ctx context.Context, sessionID, runID string, messages []*schema.Message) error {
-	data, err := json.Marshal(messages)
-	if err != nil {
-		return fmt.Errorf("marshal active messages: %w", err)
-	}
-	key := activeMessagesKey(sessionID, runID)
-	if err := s.rdb.Set(ctx, key, string(data), s.setExpiration()).Err(); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (s *redisStore) getActiveMessages(ctx context.Context, sessionID, runID string) ([]*schema.Message, error) {
-	value, err := s.rdb.Get(ctx, activeMessagesKey(sessionID, runID)).Result()
-	if err == redis.Nil {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var messages []*schema.Message
-	if err := json.Unmarshal([]byte(value), &messages); err != nil {
-		return nil, fmt.Errorf("unmarshal active messages: %w", err)
-	}
-	return messages, nil
-}
-
-func (s *redisStore) replaceSessionMessages(ctx context.Context, sessionID string, messages []*schema.Message) error {
-	values := make([]any, 0, len(messages))
-	for _, msg := range messages {
-		data, err := json.Marshal(msg)
-		if err != nil {
-			return fmt.Errorf("marshal session message: %w", err)
-		}
-		values = append(values, string(data))
-	}
-	key := sessionMessagesKey(sessionID)
-	pipe := s.rdb.TxPipeline()
-	pipe.Del(ctx, key)
-	if len(values) > 0 {
-		pipe.RPush(ctx, key, values...)
-	}
-	if s.ttl > 0 {
-		pipe.Expire(ctx, key, s.ttl)
-	}
-	if _, err := pipe.Exec(ctx); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (s *redisStore) commitRunMessages(ctx context.Context, sessionID, runID string, outputMessages []*schema.Message) error {
-	active, err := s.getActiveMessages(ctx, sessionID, runID)
-	if err != nil {
-		return err
-	}
-	messages := append(active, outputMessages...)
-	if err := s.replaceSessionMessages(ctx, sessionID, messages); err != nil {
-		return err
-	}
-	_ = s.rdb.Del(ctx, activeMessagesKey(sessionID, runID)).Err()
-	return nil
 }
 
 func (s *redisStore) deleteSession(ctx context.Context, sessionID string) error {
