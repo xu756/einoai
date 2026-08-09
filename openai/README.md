@@ -23,8 +23,9 @@ run, err := svc.CreateRun(ctx, einoai.CreateRunRequest{
     },
 })
 stream, err := svc.SubscribeEvents(ctx, einoai.SubscribeRequest{
-    SessionID: run.SessionID,
-    RunID:     run.RunID,
+    SessionID:    run.SessionID,
+    RunID:        run.RunID,
+    AfterEventID: "", // 重连时可传内部 event id
 })
 defer stream.Close()
 
@@ -44,3 +45,8 @@ body, err := openai.CollectChatCompletion(ctx, req, stream)
 - `NewCancelResponse()` 和 `NewDeleteSessionResponse()` 返回 `{ "ok": true }`。
 
 session GET 只返回 run 状态。业务 history 必须由应用自己的 endpoint 查询；实时 stream 仍使用 OpenAI-compatible chunk，支持 reasoning extension、tool calls、finish reason 和可选 usage。
+
+
+## Run 查询与生命周期
+
+`GetRun(sessionID)` 只返回当前非终态 run；需要读取已经完成、取消或失败的 run metadata 时，使用 `NewService` 返回的 `RunLookupService.GetRunByID(sessionID, runID)`。默认 run timeout 为 10 分钟，可通过 `WithRunTimeout` 修改。

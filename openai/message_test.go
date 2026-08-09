@@ -124,3 +124,21 @@ func rawString(t *testing.T, raw json.RawMessage) string {
 	}
 	return text
 }
+
+func TestResolveSessionIDUsesExplicitCandidate(t *testing.T) {
+	got := ResolveSessionID(ChatCompletionsRequest{Model: "gpt-4o"}, "", "session_123")
+	if got != "session_123" {
+		t.Fatalf("expected explicit session id, got %q", got)
+	}
+}
+
+func TestResolveSessionIDGeneratesUniqueTemporaryIDs(t *testing.T) {
+	first := ResolveSessionID(ChatCompletionsRequest{Model: "gpt-4o"})
+	second := ResolveSessionID(ChatCompletionsRequest{Model: "gpt-4o"})
+	if first == "" || second == "" {
+		t.Fatal("temporary session ids must not be empty")
+	}
+	if first == second {
+		t.Fatalf("stateless requests shared session id %q", first)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -38,7 +39,29 @@ func currentRunKey(sessionID string) string {
 }
 
 func sessionKeysPattern(sessionID string) string {
-	return fmt.Sprintf("chat:sessions:%s:*", sessionID)
+	return fmt.Sprintf("chat:sessions:%s:*", escapeRedisGlob(sessionID))
+}
+
+func escapeRedisGlob(value string) string {
+	replacer := strings.NewReplacer(
+		`\`, `\\`,
+		`*`, `\*`,
+		`?`, `\?`,
+		`[`, `\[`,
+		`]`, `\]`,
+	)
+	return replacer.Replace(value)
+}
+
+func (s *redisStore) ttlMilliseconds() int64 {
+	if s.ttl <= 0 {
+		return 0
+	}
+	ms := s.ttl.Milliseconds()
+	if ms == 0 {
+		return 1
+	}
+	return ms
 }
 
 func (s *redisStore) initRun(ctx context.Context, run *RunInfo) error {
@@ -51,35 +74,88 @@ func (s *redisStore) initRun(ctx context.Context, run *RunInfo) error {
 		return fmt.Errorf("marshal metadata: %w", err)
 	}
 
-	metaKey := runMetaKey(run.SessionID, run.RunID)
-	if err := s.rdb.HSet(ctx, metaKey, map[string]any{
-		"session_id": run.SessionID,
-		"run_id":     run.RunID,
-		"status":     string(run.Status),
-		"error":      run.Error,
-		"created_at": now.UnixMilli(),
-		"updated_at": now.UnixMilli(),
-		"metadata":   string(metadata),
-	}).Err(); err != nil {
+	const script = `
+if redis.call("EXISTS", KEYS[1]) ~= 0 then
+	return 0
+end
+redis.call("HSET", KEYS[2],
+	"session_id", ARGV[1],
+	"run_id", ARGV[2],
+	"status", ARGV[3],
+	"error", ARGV[4],
+	"created_at", ARGV[5],
+	"updated_at", ARGV[5],
+	"metadata", ARGV[6])
+redis.call("SET", KEYS[1], ARGV[2])
+local ttl = tonumber(ARGV[7])
+if ttl and ttl > 0 then
+	redis.call("PEXPIRE", KEYS[1], ttl)
+	redis.call("PEXPIRE", KEYS[2], ttl)
+end
+return 1
+`
+	created, err := s.rdb.Eval(ctx, script, []string{
+		currentRunKey(run.SessionID),
+		runMetaKey(run.SessionID, run.RunID),
+	},
+		run.SessionID,
+		run.RunID,
+		string(run.Status),
+		run.Error,
+		now.UnixMilli(),
+		string(metadata),
+		s.ttlMilliseconds(),
+	).Int()
+	if err != nil {
 		return err
 	}
-	if err := s.rdb.Set(ctx, currentRunKey(run.SessionID), run.RunID, s.setExpiration()).Err(); err != nil {
-		return err
+	if created == 0 {
+		return ErrRunActive
 	}
-
-	s.expire(ctx, metaKey)
-	s.expire(ctx, runEventsKey(run.SessionID, run.RunID))
 	return nil
 }
 
 func (s *redisStore) setRunStatus(ctx context.Context, sessionID, runID string, status RunStatus, errText string) error {
-	metaKey := runMetaKey(sessionID, runID)
-	now := time.Now().UnixMilli()
-	if err := s.rdb.HSet(ctx, metaKey, "status", string(status), "updated_at", now, "error", errText).Err(); err != nil {
+	const script = `
+if redis.call("EXISTS", KEYS[1]) == 0 then
+	return 0
+end
+local current = redis.call("HGET", KEYS[1], "status")
+if current == "completed" or current == "cancelled" or current == "failed" then
+	if current == ARGV[1] then
+		return 1
+	end
+	return -1
+end
+redis.call("HSET", KEYS[1], "status", ARGV[1], "updated_at", ARGV[2], "error", ARGV[3])
+local ttl = tonumber(ARGV[4])
+if ttl and ttl > 0 then
+	redis.call("PEXPIRE", KEYS[1], ttl)
+	if redis.call("GET", KEYS[2]) == ARGV[5] then
+		redis.call("PEXPIRE", KEYS[2], ttl)
+	end
+end
+return 1
+`
+	updated, err := s.rdb.Eval(ctx, script, []string{
+		runMetaKey(sessionID, runID),
+		currentRunKey(sessionID),
+	},
+		string(status),
+		time.Now().UnixMilli(),
+		errText,
+		s.ttlMilliseconds(),
+		runID,
+	).Int()
+	if err != nil {
 		return err
 	}
-	s.expire(ctx, currentRunKey(sessionID))
-	s.expire(ctx, metaKey)
+	if updated == 0 {
+		return ErrRunNotFound
+	}
+	if updated < 0 {
+		return errRunTerminal
+	}
 	return nil
 }
 
@@ -122,6 +198,13 @@ func (s *redisStore) getCurrentRun(ctx context.Context, sessionID string) (*RunI
 	return run, nil
 }
 
+func (s *redisStore) deleteRun(ctx context.Context, sessionID, runID string) error {
+	if err := s.clearCurrentRunIfMatches(ctx, sessionID, runID); err != nil {
+		return err
+	}
+	return s.rdb.Del(ctx, runMetaKey(sessionID, runID), runEventsKey(sessionID, runID)).Err()
+}
+
 func (s *redisStore) deleteSession(ctx context.Context, sessionID string) error {
 	var cursor uint64
 	for {
@@ -130,8 +213,16 @@ func (s *redisStore) deleteSession(ctx context.Context, sessionID string) error 
 			return err
 		}
 		if len(keys) > 0 {
-			if err := s.rdb.Del(ctx, keys...).Err(); err != nil {
-				return err
+			filtered := keys[:0]
+			for _, key := range keys {
+				if belongsToSessionKey(sessionID, key) {
+					filtered = append(filtered, key)
+				}
+			}
+			if len(filtered) > 0 {
+				if err := s.rdb.Del(ctx, filtered...).Err(); err != nil {
+					return err
+				}
 			}
 		}
 		cursor = nextCursor
@@ -139,6 +230,19 @@ func (s *redisStore) deleteSession(ctx context.Context, sessionID string) error 
 			return nil
 		}
 	}
+}
+
+func belongsToSessionKey(sessionID, key string) bool {
+	prefix := fmt.Sprintf("chat:sessions:%s:", sessionID)
+	if !strings.HasPrefix(key, prefix) {
+		return false
+	}
+	suffix := strings.TrimPrefix(key, prefix)
+	if suffix == "current_run" {
+		return true
+	}
+	parts := strings.Split(suffix, ":")
+	return len(parts) == 3 && parts[0] == "runs" && parts[1] != "" && (parts[2] == "meta" || parts[2] == "events")
 }
 
 func (s *redisStore) getRunForEvents(ctx context.Context, sessionID, runID string) (*RunInfo, error) {
@@ -193,30 +297,46 @@ func (s *redisStore) appendEvent(ctx context.Context, ev RunEvent) (*RunEvent, e
 		return nil, fmt.Errorf("marshal event: %w", err)
 	}
 
-	id, err := s.rdb.XAdd(ctx, &redis.XAddArgs{
-		Stream: runEventsKey(ev.SessionID, ev.RunID),
-		ID:     "*",
-		Values: map[string]any{
-			"data": string(body),
-			"ts":   ev.CreatedAt.UnixMilli(),
-		},
-	}).Result()
+	const script = `
+if redis.call("EXISTS", KEYS[1]) == 0 then
+	return "__missing__"
+end
+local status = redis.call("HGET", KEYS[1], "status")
+if status == "completed" or status == "cancelled" or status == "failed" then
+	return "__terminal__"
+end
+local id = redis.call("XADD", KEYS[2], "*", "data", ARGV[1], "ts", ARGV[2])
+local ttl = tonumber(ARGV[3])
+if ttl and ttl > 0 then
+	redis.call("PEXPIRE", KEYS[1], ttl)
+	redis.call("PEXPIRE", KEYS[2], ttl)
+	if redis.call("GET", KEYS[3]) == ARGV[4] then
+		redis.call("PEXPIRE", KEYS[3], ttl)
+	end
+end
+return id
+`
+	result, err := s.rdb.Eval(ctx, script, []string{
+		runMetaKey(ev.SessionID, ev.RunID),
+		runEventsKey(ev.SessionID, ev.RunID),
+		currentRunKey(ev.SessionID),
+	}, string(body), ev.CreatedAt.UnixMilli(), s.ttlMilliseconds(), ev.RunID).Result()
 	if err != nil {
 		return nil, err
 	}
+	id, ok := result.(string)
+	if !ok {
+		return nil, fmt.Errorf("append event returned unexpected result %T", result)
+	}
+	switch id {
+	case "__missing__":
+		return nil, ErrRunNotFound
+	case "__terminal__":
+		return nil, errRunTerminal
+	}
 
 	ev.ID = id
-	s.expire(ctx, runEventsKey(ev.SessionID, ev.RunID))
-	s.expire(ctx, runMetaKey(ev.SessionID, ev.RunID))
-	s.expire(ctx, currentRunKey(ev.SessionID))
 	return &ev, nil
-}
-
-func (s *redisStore) setExpiration() time.Duration {
-	if s.ttl <= 0 {
-		return 0
-	}
-	return s.ttl
 }
 
 func (s *redisStore) expire(ctx context.Context, key string) {

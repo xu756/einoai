@@ -2,6 +2,7 @@ package einoai
 
 import (
 	"context"
+	"errors"
 	"log"
 	"time"
 
@@ -13,10 +14,20 @@ import (
 const (
 	// DefaultRedisTTL is the default expiration for Redis-backed run and event keys.
 	DefaultRedisTTL = 7 * 24 * time.Hour
+	// DefaultRunTimeout limits one asynchronous agent run.
+	DefaultRunTimeout = 10 * time.Minute
 )
 
 // RunStatus is the lifecycle state for a persisted run.
 type RunStatus string
+
+var (
+	// ErrRunActive indicates that the session already has a non-terminal run.
+	ErrRunActive = errors.New("einoai: session already has an active run")
+	// ErrRunNotFound indicates that a requested run does not exist.
+	ErrRunNotFound = errors.New("einoai: run not found")
+	errRunTerminal = errors.New("einoai: run is already terminal")
+)
 
 const (
 	RunStatusQueued    RunStatus = "queued"
@@ -52,8 +63,9 @@ type CompletionErrorHandler func(context.Context, string, string, error)
 
 // SubscribeRequest opens a persisted event stream for a run.
 type SubscribeRequest struct {
-	SessionID string
-	RunID     string
+	SessionID    string
+	RunID        string
+	AfterEventID string // Redis stream id to resume after; empty replays from the beginning.
 }
 
 // RunInfo is stable metadata for a run.
@@ -76,8 +88,16 @@ type Service interface {
 	SubscribeEvents(ctx context.Context, req SubscribeRequest) (EventStream, error)
 }
 
+// RunLookupService extends Service with lookup for persisted terminal runs.
+// Keeping this separate preserves compatibility for existing Service mocks.
+type RunLookupService interface {
+	Service
+	GetRunByID(ctx context.Context, sessionID string, runID string) (*RunInfo, error)
+}
+
 type serviceOptions struct {
 	redisTTL            time.Duration
+	runTimeout          time.Duration
 	completionErrorHook CompletionErrorHandler
 }
 
@@ -93,6 +113,16 @@ func WithRedisTTL(ttl time.Duration) ServiceOption {
 	}
 }
 
+// WithRunTimeout configures the maximum lifetime of an asynchronous run.
+//
+// A timeout <= 0 disables the service-level deadline. The request context is
+// detached from cancellation, while its values are preserved for the run.
+func WithRunTimeout(timeout time.Duration) ServiceOption {
+	return func(opts *serviceOptions) {
+		opts.runTimeout = timeout
+	}
+}
+
 // WithCompletionErrorHandler configures observation of completion hook failures.
 func WithCompletionErrorHandler(handler CompletionErrorHandler) ServiceOption {
 	return func(opts *serviceOptions) {
@@ -102,7 +132,8 @@ func WithCompletionErrorHandler(handler CompletionErrorHandler) ServiceOption {
 
 func defaultServiceOptions() serviceOptions {
 	return serviceOptions{
-		redisTTL: DefaultRedisTTL,
+		redisTTL:   DefaultRedisTTL,
+		runTimeout: DefaultRunTimeout,
 		completionErrorHook: func(_ context.Context, sessionID, runID string, err error) {
 			log.Printf("einoai completion hook failed session=%s run=%s: %v", sessionID, runID, err)
 		},
@@ -110,7 +141,7 @@ func defaultServiceOptions() serviceOptions {
 }
 
 // NewService creates the core einoai service.
-func NewService(db *redis.Client, opts ...ServiceOption) Service {
+func NewService(db *redis.Client, opts ...ServiceOption) RunLookupService {
 	options := defaultServiceOptions()
 	for _, opt := range opts {
 		if opt != nil {

@@ -23,8 +23,9 @@ run, err := svc.CreateRun(ctx, einoai.CreateRunRequest{
     },
 })
 stream, err := svc.SubscribeEvents(ctx, einoai.SubscribeRequest{
-    SessionID: run.SessionID,
-    RunID:     run.RunID,
+    SessionID:    run.SessionID,
+    RunID:        run.RunID,
+    AfterEventID: "", // 重连时可传内部 event id
 })
 defer stream.Close()
 aisdk.SetEventStreamHeaders(w.Header())
@@ -40,3 +41,8 @@ err = aisdk.WriteEventStreamTo(ctx, w, flush, stream)
 - `NewCancelResponse()` 和 `NewDeleteSessionResponse()` 返回 `{ "ok": true }`。
 
 `GET /sessions/:sessionId` 的 history 应由应用自己的 endpoint 查询。实时 stream 仍会返回完整的 text、reasoning、tool 和 finish 事件。
+
+
+## Run 查询与生命周期
+
+`GetRun(sessionID)` 只返回当前非终态 run；需要读取已经完成、取消或失败的 run metadata 时，使用 `NewService` 返回的 `RunLookupService.GetRunByID(sessionID, runID)`。默认 run timeout 为 10 分钟，可通过 `WithRunTimeout` 修改。

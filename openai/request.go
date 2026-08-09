@@ -1,9 +1,13 @@
 package openai
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"time"
 )
 
 // ChatCompletionsRequest is an OpenAI-compatible chat completions request.
@@ -76,16 +80,23 @@ func DecodeChatCompletionsRequest(body io.Reader) (ChatCompletionsRequest, error
 	return req, nil
 }
 
-// ResolveSessionID lets callers keep OpenAI stateless or attach their own ids.
-func ResolveSessionID(req ChatCompletionsRequest, candidates ...string) string {
+// ResolveSessionID returns the first explicit session id, or a unique temporary
+// id for stateless Chat Completions requests. The model name is intentionally
+// not used as a shared fallback because unrelated concurrent requests must not
+// contend for the same run slot.
+func ResolveSessionID(_ ChatCompletionsRequest, candidates ...string) string {
 	for _, v := range candidates {
-		if v == "" {
-			continue
+		if v != "" {
+			return v
 		}
-		return v
 	}
-	if req.Model != "" {
-		return "openai-" + req.Model
+	return newTemporarySessionID()
+}
+
+func newTemporarySessionID() string {
+	b := make([]byte, 12)
+	if _, err := rand.Read(b); err == nil {
+		return "openai-" + hex.EncodeToString(b)
 	}
-	return "openai"
+	return fmt.Sprintf("openai-%d", time.Now().UnixNano())
 }

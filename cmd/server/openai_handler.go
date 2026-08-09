@@ -15,6 +15,7 @@ func (a *app) registerOpenAI(r gin.IRouter) {
 	r.POST("/sessions/:sessionId", a.createOpenAIRun)
 	r.GET("/sessions/:sessionId", a.getOpenAIRun)
 	r.DELETE("/sessions/:sessionId", a.deleteOpenAISession)
+	r.GET("/sessions/:sessionId/runs/:run_id", a.getOpenAIRunByID)
 	r.POST("/sessions/:sessionId/runs/:run_id", a.subscribeOpenAIEvents)
 	r.POST("/sessions/:sessionId/runs/:run_id/cancel", a.cancelOpenAIRun)
 }
@@ -106,6 +107,15 @@ func (a *app) createOpenAIRun(c *gin.Context) {
 func (a *app) getOpenAIRun(c *gin.Context) {
 	sessionID := c.Param("sessionId")
 	run, err := a.svc.GetRun(c.Request.Context(), sessionID)
+	if err != nil {
+		writeOpenAIError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, openai.NewRunResponse(run))
+}
+
+func (a *app) getOpenAIRunByID(c *gin.Context) {
+	run, err := a.svc.GetRunByID(c.Request.Context(), c.Param("sessionId"), c.Param("run_id"))
 	if err != nil {
 		writeOpenAIError(c, err)
 		return

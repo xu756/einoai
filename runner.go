@@ -3,6 +3,7 @@ package einoai
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -207,8 +208,13 @@ func (b *runEventBuilder) writeToolCall(ctx context.Context, position int, tc sc
 }
 
 func (b *runEventBuilder) flushToolCalls(ctx context.Context) error {
-	for index, st := range b.toolCalls {
-		if err := b.flushToolCall(ctx, index, st); err != nil {
+	indexes := make([]int, 0, len(b.toolCalls))
+	for index := range b.toolCalls {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+	for _, index := range indexes {
+		if err := b.flushToolCall(ctx, index, b.toolCalls[index]); err != nil {
 			return err
 		}
 	}

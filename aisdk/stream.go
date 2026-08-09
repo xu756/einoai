@@ -23,6 +23,7 @@ type toolState struct {
 type streamState struct {
 	started   bool
 	toolCalls map[string]*toolState
+	toolOrder []string
 }
 
 // FlushFunc flushes buffered stream data to the client.
@@ -146,6 +147,7 @@ func writeToolCall(w eventStreamWriter, state *streamState, id string, data eino
 	if st == nil {
 		st = &toolState{id: data.ID, name: data.Name}
 		state.toolCalls[data.ID] = st
+		state.toolOrder = append(state.toolOrder, data.ID)
 	}
 	if !st.started {
 		if err := w.writePart(id, map[string]any{"type": "tool-input-start", "toolCallId": st.id, "toolName": st.name}); err != nil {
@@ -167,6 +169,7 @@ func writeToolResult(w eventStreamWriter, state *streamState, id string, data ei
 	if st == nil {
 		st = &toolState{id: data.ToolCallID, name: data.Name}
 		state.toolCalls[data.ToolCallID] = st
+		state.toolOrder = append(state.toolOrder, data.ToolCallID)
 	}
 	if !st.available {
 		if err := writeToolAvailable(w, id, st); err != nil {
@@ -177,8 +180,9 @@ func writeToolResult(w eventStreamWriter, state *streamState, id string, data ei
 }
 
 func writePendingToolsAvailable(w eventStreamWriter, state *streamState, id string) error {
-	for _, st := range state.toolCalls {
-		if st.started && !st.available {
+	for _, toolCallID := range state.toolOrder {
+		st := state.toolCalls[toolCallID]
+		if st != nil && st.started && !st.available {
 			if err := writeToolAvailable(w, id, st); err != nil {
 				return err
 			}

@@ -14,6 +14,7 @@ func (a *app) registerAISDK(r gin.IRouter) {
 	r.POST("/sessions/:sessionId", a.createAIRun)
 	r.GET("/sessions/:sessionId", a.getAIRun)
 	r.DELETE("/sessions/:sessionId", a.deleteAISession)
+	r.GET("/sessions/:sessionId/runs/:run_id", a.getAIRunByID)
 	r.POST("/sessions/:sessionId/runs/:run_id", a.subscribeAIEvents)
 	r.POST("/sessions/:sessionId/runs/:run_id/cancel", a.cancelAIRun)
 }
@@ -35,7 +36,7 @@ func (a *app) aiCompletions(c *gin.Context) {
 		return
 	}
 	run, err := a.svc.CreateRun(c.Request.Context(), newAgentRunRequest(
-		"usechat-completions",
+		temporarySessionID("usechat"),
 		messages,
 		agent,
 		a.onRunCompleted,
@@ -95,6 +96,15 @@ func (a *app) getAIRun(c *gin.Context) {
 	sessionID := c.Param("sessionId")
 
 	run, err := a.svc.GetRun(c.Request.Context(), sessionID)
+	if err != nil {
+		writeAIError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, aisdk.NewRunResponse(run))
+}
+
+func (a *app) getAIRunByID(c *gin.Context) {
+	run, err := a.svc.GetRunByID(c.Request.Context(), c.Param("sessionId"), c.Param("run_id"))
 	if err != nil {
 		writeAIError(c, err)
 		return

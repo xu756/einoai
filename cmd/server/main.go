@@ -25,7 +25,7 @@ import (
 
 type app struct {
 	model model.ToolCallingChatModel
-	svc   einoai.Service
+	svc   einoai.RunLookupService
 }
 
 // onRunCompleted is the application-owned history persistence seam.
@@ -74,6 +74,7 @@ func main() {
 		svc: einoai.NewService(
 			rdb,
 			einoai.WithRedisTTL(envDuration("REDIS_TTL", einoai.DefaultRedisTTL)),
+			einoai.WithRunTimeout(envDuration("RUN_TIMEOUT", einoai.DefaultRunTimeout)),
 		),
 	}
 

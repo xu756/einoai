@@ -5,7 +5,9 @@
 ## 存储与生命周期
 
 - Redis 保存 run metadata、current run 指针和 per-run event stream。
-- `CreateRun` 接收本次请求的完整 `messages` 快照。
+- `CreateRun` 接收本次请求的完整 `messages` 快照，并复制消息后再写内部 ID，不修改调用方对象。
+- 同一 session 只能有一个非终态 run；创建占位由 Redis 原子保证。
+- 默认 run timeout 为 10 分钟，可通过 `WithRunTimeout` 配置。
 - 正常完成后，`CreateRunRequest.OnCompleted` 收到 `RunResult.Messages`。
 - 取消、异常和删除不会触发完成 hook。
 - hook 错误不会改变已完成 run 的状态；通过 `WithCompletionErrorHandler` 观察。
@@ -33,7 +35,7 @@
 
 ### `GET /sessions/:sessionId`
 
-返回 run 状态，不返回 history：
+返回当前非终态 run，不返回 history：
 
 ```json
 {
@@ -45,11 +47,15 @@
 }
 ```
 
-应用自己的 history endpoint 应直接查询业务 repository。
+run 进入终态后该接口返回空 run；应用自己的 history endpoint 应直接查询业务 repository。
+
+### `GET /sessions/:sessionId/runs/:run_id`
+
+按 run id 查询持久化 metadata，可读取 `completed`、`cancelled`、`failed` 等终态。该方法属于 `RunLookupService` 扩展接口；原 `Service` 方法集保持兼容。run 不存在时返回可由 `errors.Is(err, einoai.ErrRunNotFound)` 识别的错误。
 
 ### `POST /sessions/:sessionId/runs/:run_id`
 
-订阅指定 run 的 UI Message Stream。事件包括 text、reasoning、tool call、tool result、finish 和 usage。
+订阅指定 run 的 UI Message Stream。事件包括 text、reasoning、tool call、tool result、finish 和 usage。核心 `SubscribeEvents` 支持 `AfterEventID` 作为内部事件游标。
 
 ### `POST /sessions/:sessionId/runs/:run_id/cancel`
 
@@ -73,21 +79,15 @@
 
 ### `GET /sessions/:sessionId`
 
-返回：
+返回当前非终态 run；run 完成后返回空 run。
 
-```json
-{
-  "run": {
-    "session_id": "session_1",
-    "run_id": "run_1",
-    "status": "completed"
-  }
-}
-```
+### `GET /sessions/:sessionId/runs/:run_id`
+
+按 run id 查询持久化 metadata，因此可以读取终态状态。
 
 ### `POST /sessions/:sessionId/runs/:run_id`
 
-订阅指定 run 的 OpenAI-compatible stream。`include_usage=true` query 会请求最终 usage chunk。
+订阅指定 run 的 OpenAI-compatible stream。`include_usage=true` query 会请求最终 usage chunk。核心 `SubscribeEvents` 支持 `AfterEventID`；示例 HTTP handler 尚未直接映射 `Last-Event-ID`。
 
 ### `POST /sessions/:sessionId/runs/:run_id/cancel`
 
