@@ -8,14 +8,11 @@ import (
 	"strconv"
 	"time"
 
-	ccb "github.com/cloudwego/eino-ext/callbacks/cozeloop"
 	openaimodel "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
-	"github.com/coze-dev/cozeloop-go"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
@@ -39,14 +36,6 @@ func main() {
 	_ = godotenv.Load()
 
 	ctx := context.Background()
-	cozeClient, err := cozeloop.NewClient()
-	if err != nil {
-		panic(err)
-	}
-	defer cozeClient.Close(ctx)
-
-	handler := ccb.NewLoopHandler(cozeClient)
-	callbacks.AppendGlobalHandlers(handler)
 
 	chatModel, err := openaimodel.NewChatModel(ctx, &openaimodel.ChatModelConfig{
 		APIKey:  os.Getenv("OPENAI_API_KEY"),
