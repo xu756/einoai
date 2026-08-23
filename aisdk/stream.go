@@ -10,6 +10,8 @@ import (
 	"os"
 
 	"github.com/xu756/einoai"
+
+	"github.com/cloudwego/eino/schema"
 )
 
 type toolState struct {
@@ -18,12 +20,15 @@ type toolState struct {
 	inputText string
 	available bool
 	started   bool
+	completed bool
 }
 
 type streamState struct {
-	started   bool
-	toolCalls map[string]*toolState
-	toolOrder []string
+	started           bool
+	pendingStepFinish bool
+	toolCalls         map[string]*toolState
+	toolOrder         []string
+	runErr            error
 }
 
 // FlushFunc flushes buffered stream data to the client.
@@ -43,41 +48,56 @@ func SetEventStreamHeaders(header http.Header) {
 	header.Set("x-vercel-ai-ui-message-stream", "v1")
 }
 
-// WriteEventStreamTo writes einoai events as AI SDK SSE to any writer.
-func WriteEventStreamTo(ctx context.Context, writer io.Writer, flush FlushFunc, stream einoai.EventStream) error {
+// WriteEventStreamTo writes einoai events as AI SDK UI Message Stream SSE.
+//
+// The returned messages are the complete Eino output messages for the run. They
+// are kept out of the wire protocol so the caller can persist them directly.
+func WriteEventStreamTo(ctx context.Context, writer io.Writer, flush FlushFunc, stream einoai.EventStream) ([]*schema.Message, error) {
 	out := eventStreamWriter{writer: writer, flush: flush}
 	state := newStreamState()
+	var output []*schema.Message
 
 	for {
 		ev, err := stream.Next(ctx)
 		if err == io.EOF {
-			return out.writeDone()
+			if writeErr := out.writeDone(); writeErr != nil {
+				return output, writeErr
+			}
+			return output, state.runErr
 		}
 		if errors.Is(err, context.Canceled) {
-			return nil
+			return output, nil
 		}
 		if err != nil {
 			_ = out.writeStreamError(err)
-			return err
+			return output, err
 		}
 		if ev == nil {
 			continue
 		}
+		if ev.Type == einoai.EventFinish {
+			if data, ok := einoai.DecodeEventData[einoai.FinishData](ev); ok && data.FinishReason != "tool_calls" && data.FinishReason != "tool-calls" && data.Output != nil {
+				output = data.Output
+			}
+		}
 		if !state.started {
 			if err := out.writePart(ev.ID, map[string]any{"type": "start", "messageId": "msg_" + ev.RunID}); err != nil {
-				return err
+				return output, err
 			}
 			if err := out.writePart(ev.ID, map[string]any{"type": "start-step"}); err != nil {
-				return err
+				return output, err
 			}
 			state.started = true
 		}
 		done, err := writeEvent(out, state, ev)
 		if err != nil {
-			return err
+			return output, err
 		}
 		if done {
-			return out.writeDone()
+			if writeErr := out.writeDone(); writeErr != nil {
+				return output, writeErr
+			}
+			return output, state.runErr
 		}
 	}
 }
@@ -107,22 +127,35 @@ func writeEvent(w eventStreamWriter, state *streamState, ev *einoai.RunEvent) (b
 		return false, writeToolCall(w, state, ev.ID, data)
 	case einoai.EventToolResult:
 		data, _ := einoai.DecodeEventData[einoai.ToolResultData](ev)
-		return false, writeToolResult(w, state, ev.ID, data)
-	case einoai.EventError:
-		data, _ := einoai.DecodeEventData[einoai.ErrorData](ev)
-		return false, w.writePart(ev.ID, map[string]any{"type": "error", "errorText": data.Message})
-	case einoai.EventFinish:
-		data, _ := einoai.DecodeEventData[einoai.FinishData](ev)
-		if data.FinishReason == "tool_calls" {
-			if err := writePendingToolsAvailable(w, state, ev.ID); err != nil {
-				return false, err
-			}
+		if err := writeToolResult(w, state, ev.ID, data); err != nil {
+			return false, err
+		}
+		if state.pendingStepFinish && allToolOutputsCompleted(state) {
 			if err := w.writePart(ev.ID, createFinishStepEvent()); err != nil {
 				return false, err
 			}
 			if err := w.writePart(ev.ID, map[string]any{"type": "start-step"}); err != nil {
 				return false, err
 			}
+			beginNextStep(state)
+		}
+		return false, nil
+	case einoai.EventError:
+		data, _ := einoai.DecodeEventData[einoai.ErrorData](ev)
+		state.runErr = errors.New(data.Message)
+		return false, w.writePart(ev.ID, map[string]any{"type": "error", "errorText": data.Message})
+	case einoai.EventFinish:
+		data, _ := einoai.DecodeEventData[einoai.FinishData](ev)
+		if data.FinishReason == "cancelled" || data.FinishReason == "canceled" {
+			return true, w.writePart(ev.ID, map[string]any{"type": "abort", "reason": "cancelled"})
+		}
+		if data.FinishReason == "tool_calls" || data.FinishReason == "tool-calls" {
+			if err := writePendingToolsAvailable(w, state, ev.ID); err != nil {
+				return false, err
+			}
+			// The Eino agent executes these tools on the server. Keep the current
+			// step open until all tool outputs have been streamed.
+			state.pendingStepFinish = true
 			return false, nil
 		}
 		if err := w.writePart(ev.ID, createFinishStepEvent()); err != nil {
@@ -150,7 +183,7 @@ func writeToolCall(w eventStreamWriter, state *streamState, id string, data eino
 		state.toolOrder = append(state.toolOrder, data.ID)
 	}
 	if !st.started {
-		if err := w.writePart(id, map[string]any{"type": "tool-input-start", "toolCallId": st.id, "toolName": st.name}); err != nil {
+		if err := w.writePart(id, map[string]any{"type": "tool-input-start", "toolCallId": st.id, "toolName": st.name, "providerExecuted": true}); err != nil {
 			return err
 		}
 		st.started = true
@@ -176,7 +209,11 @@ func writeToolResult(w eventStreamWriter, state *streamState, id string, data ei
 			return err
 		}
 	}
-	return w.writePart(id, map[string]any{"type": "tool-output-available", "toolCallId": st.id, "output": data.Content})
+	if err := w.writePart(id, map[string]any{"type": "tool-output-available", "toolCallId": st.id, "output": data.Content, "providerExecuted": true}); err != nil {
+		return err
+	}
+	st.completed = true
+	return nil
 }
 
 func writePendingToolsAvailable(w eventStreamWriter, state *streamState, id string) error {
@@ -191,6 +228,25 @@ func writePendingToolsAvailable(w eventStreamWriter, state *streamState, id stri
 	return nil
 }
 
+func allToolOutputsCompleted(state *streamState) bool {
+	if state == nil || len(state.toolOrder) == 0 {
+		return false
+	}
+	for _, toolCallID := range state.toolOrder {
+		st := state.toolCalls[toolCallID]
+		if st != nil && st.started && !st.completed {
+			return false
+		}
+	}
+	return true
+}
+
+func beginNextStep(state *streamState) {
+	state.pendingStepFinish = false
+	state.toolCalls = make(map[string]*toolState)
+	state.toolOrder = nil
+}
+
 func newStreamState() *streamState {
 	return &streamState{
 		toolCalls: make(map[string]*toolState),
@@ -199,10 +255,11 @@ func newStreamState() *streamState {
 
 func writeToolAvailable(w eventStreamWriter, id string, st *toolState) error {
 	if err := w.writePart(id, map[string]any{
-		"type":       "tool-input-available",
-		"toolCallId": st.id,
-		"toolName":   st.name,
-		"input":      parseMaybeJSON(st.inputText),
+		"type":             "tool-input-available",
+		"toolCallId":       st.id,
+		"toolName":         st.name,
+		"input":            parseMaybeJSON(st.inputText),
+		"providerExecuted": true,
 	}); err != nil {
 		return err
 	}
@@ -257,12 +314,18 @@ func createUsage(data einoai.FinishData) map[string]any {
 
 func normalizeFinishReason(reason string) string {
 	switch reason {
-	case "tool_calls":
+	case "", "stop":
+		return "stop"
+	case "length":
+		return "length"
+	case "tool_calls", "tool-calls":
 		return "tool-calls"
-	case "content_filter":
+	case "content_filter", "content-filter":
 		return "content-filter"
+	case "error":
+		return "error"
 	default:
-		return reason
+		return "other"
 	}
 }
 
@@ -271,11 +334,7 @@ func (w eventStreamWriter) writePart(id string, part map[string]any) error {
 	if err != nil {
 		return err
 	}
-	if id != "" {
-		if _, err := fmt.Fprintf(w.writer, "id: %s\n", id); err != nil {
-			return err
-		}
-	}
+	_ = id // Internal Redis event IDs are not part of the AI SDK UI Message Stream wire format.
 	if _, err := fmt.Fprintf(w.writer, "data: %s\n\n", b); err != nil {
 		return err
 	}

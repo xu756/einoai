@@ -386,7 +386,7 @@ func (s *service) CancelRun(ctx context.Context, sessionID string, runID string)
 	if s.cancelActiveRun(runID) {
 		return nil
 	}
-	if err := s.appendFinish(ctx, sessionID, runID, "cancelled", nil); err != nil {
+	if err := s.appendFinish(ctx, sessionID, runID, "cancelled", nil, nil); err != nil {
 		return err
 	}
 	if err := s.store.setRunStatus(ctx, sessionID, runID, RunStatusCancelled, ""); err != nil {
@@ -508,7 +508,8 @@ func (s *service) watchRunLifecycle(ctx context.Context, sessionID, runID string
 
 func (s *service) finishCancelled(ctx context.Context, state *runEventBuilder, sessionID, runID string) {
 	_ = state.closeOpenBlocks(ctx)
-	_ = s.appendFinish(ctx, sessionID, runID, "cancelled", nil)
+	_ = state.commitAssistantMessage()
+	_ = s.appendFinish(ctx, sessionID, runID, "cancelled", nil, cloneMessages(state.outputMessages))
 	_ = s.store.setRunStatus(ctx, sessionID, runID, RunStatusCancelled, "")
 	_ = s.store.clearCurrentRunIfMatches(ctx, sessionID, runID)
 }
@@ -518,8 +519,9 @@ func (s *service) finishFailed(ctx context.Context, state *runEventBuilder, sess
 		return
 	}
 	_ = state.closeOpenBlocks(ctx)
+	_ = state.commitAssistantMessage()
 	_, _ = s.appendEvent(ctx, sessionID, runID, EventError, ErrorData{Message: runErr.Error()})
-	_ = s.appendFinish(ctx, sessionID, runID, "error", nil)
+	_ = s.appendFinish(ctx, sessionID, runID, "error", nil, cloneMessages(state.outputMessages))
 	_ = s.store.setRunStatus(ctx, sessionID, runID, RunStatusFailed, runErr.Error())
 	_ = s.store.clearCurrentRunIfMatches(ctx, sessionID, runID)
 }
@@ -605,10 +607,11 @@ func (s *service) appendEvent(ctx context.Context, sessionID, runID string, typ 
 	return ev, err
 }
 
-func (s *service) appendFinish(ctx context.Context, sessionID, runID string, reason string, usage *schema.TokenUsage) error {
+func (s *service) appendFinish(ctx context.Context, sessionID, runID string, reason string, usage *schema.TokenUsage, output []*schema.Message) error {
 	_, err := s.appendEvent(ctx, sessionID, runID, EventFinish, FinishData{
 		FinishReason: reason,
 		Usage:        usage,
+		Output:       output,
 	})
 	return err
 }

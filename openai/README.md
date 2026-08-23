@@ -1,6 +1,6 @@
 # einoai/openai
 
-`github.com/xu756/einoai/openai` 提供 OpenAI-compatible Chat Completions 请求转换、SSE 流和非流式结果。它不保存或读取 session history。
+`github.com/xu756/einoai/openai` 提供 OpenAI-compatible Chat Completions 请求转换和 SSE 流。completions 始终以流返回；`req.Stream` 不再切换响应模式。它不保存或读取 session history。
 
 ## 请求转换
 
@@ -29,11 +29,12 @@ stream, err := svc.SubscribeEvents(ctx, einoai.SubscribeRequest{
 })
 defer stream.Close()
 
-if req.Stream {
-    openai.SetChatCompletionStreamHeaders(w.Header())
-    return openai.WriteChatCompletionStreamTo(ctx, w, flush, req, stream)
-}
-body, err := openai.CollectChatCompletion(ctx, req, stream)
+openai.SetChatCompletionStreamHeaders(w.Header())
+output, err := openai.WriteChatCompletionStreamTo(ctx, w, flush, req, stream)
+// output 是当前 run 完整的 []*schema.Message，可直接交给主程序保存。
+
+// CollectChatCompletion 仅作为聚合工具保留，不用于 HTTP 响应模式切换：
+body, output, err := openai.CollectChatCompletion(ctx, req, stream)
 ```
 
 `OnCompleted` 只在正常完成时调用；取消和异常不会调用。hook 错误不会改变 run 状态，应用应自行处理幂等、超时和重试。
@@ -44,7 +45,7 @@ body, err := openai.CollectChatCompletion(ctx, req, stream)
 - `NewRunResponse(run)` 返回只包含 run metadata 的状态响应，不包含 history。
 - `NewCancelResponse()` 和 `NewDeleteSessionResponse()` 返回 `{ "ok": true }`。
 
-session GET 只返回 run 状态。业务 history 必须由应用自己的 endpoint 查询；实时 stream 仍使用 OpenAI-compatible chunk，支持 reasoning extension、tool calls、finish reason 和可选 usage。
+session GET 只返回 run 状态。业务 history 必须由应用自己的 endpoint 查询；实时 stream 严格输出 Chat Completions 可表示的可见文本、终止原因和可选 usage。Eino agent 内部 reasoning 与服务端工具步骤不写入 OpenAI wire，而是完整保留在 writer 返回的 `[]*schema.Message` 中。
 
 
 ## Run 查询与生命周期

@@ -74,10 +74,11 @@ type ErrorData struct {
 	Message string `json:"message,omitempty"`
 }
 
-// FinishData carries finish reason and usage.
+// FinishData carries terminal step state plus the exact Eino output on run termination.
 type FinishData struct {
 	FinishReason string             `json:"finishReason,omitempty"`
 	Usage        *schema.TokenUsage `json:"usage,omitempty"`
+	Output       []*schema.Message  `json:"output,omitempty"`
 }
 
 // DecodeEventData converts RunEvent.Data into a typed payload.

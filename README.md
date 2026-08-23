@@ -97,7 +97,7 @@ run, err := svc.CreateRun(ctx, einoai.CreateRunRequest{
 | --- | --- |
 | `github.com/xu756/einoai` | run 编排、Redis 状态、事件、取消和完成 hook |
 | `github.com/xu756/einoai/aisdk` | AI SDK UIMessage 请求转换和 UI Message Stream 输出 |
-| `github.com/xu756/einoai/openai` | OpenAI Chat Completions 请求转换和 SSE / 非流式输出 |
+| `github.com/xu756/einoai/openai` | OpenAI Chat Completions 请求转换和统一 SSE 流输出 |
 | `cmd/server` | 示例 Gin 服务，不是核心包 |
 
 请求转换仍然使用：

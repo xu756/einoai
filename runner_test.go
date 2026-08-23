@@ -137,3 +137,41 @@ func TestAssignSessionMessageIDUsesOutputNamespace(t *testing.T) {
 		t.Fatalf("generated output ID missing: %#v", message)
 	}
 }
+
+func TestFinishFailedCommitsPartialAssistantIntoFinishOutput(t *testing.T) {
+	store, cleanup := newTestRedisStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	run := &RunInfo{SessionID: "s1", RunID: "r1", Status: RunStatusRunning}
+	if err := store.initRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := &service{store: store}
+	builder := newRunEventBuilder(svc, "s1", "r1")
+	if err := builder.writeMessage(ctx, &schema.Message{Role: schema.Assistant, Content: "partial"}); err != nil {
+		t.Fatal(err)
+	}
+
+	svc.finishFailed(ctx, builder, "s1", "r1", context.DeadlineExceeded)
+
+	events, err := store.readAfter(ctx, "s1", "r1", "0-0", 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range events {
+		if ev.Type != EventFinish {
+			continue
+		}
+		data, ok := DecodeEventData[FinishData](ev)
+		if !ok {
+			t.Fatalf("failed to decode finish event: %#v", ev)
+		}
+		if data.FinishReason != "error" || len(data.Output) != 1 || data.Output[0].Content != "partial" {
+			t.Fatalf("partial assistant message missing from failed run output: %#v", data)
+		}
+		return
+	}
+	t.Fatal("failed run did not persist a finish event")
+}

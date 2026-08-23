@@ -41,75 +41,41 @@ func (*canceledEventStream) Close() error {
 	return nil
 }
 
-func TestWriteChatCompletionStreamWritesStandardToolCallDeltas(t *testing.T) {
+func TestWriteChatCompletionStreamHidesServerExecutedAgentSteps(t *testing.T) {
 	var buf bytes.Buffer
 
-	err := WriteChatCompletionStreamTo(context.Background(), &buf, nil, ChatCompletionsRequest{
+	_, err := WriteChatCompletionStreamTo(context.Background(), &buf, nil, ChatCompletionsRequest{
 		Model:  "gpt-4o",
 		Stream: true,
 	}, &sliceEventStream{events: []*einoai.RunEvent{
-		{
-			ID:    "1-0",
-			RunID: "run_1",
-			Type:  einoai.EventToolCall,
-			Data: einoai.ToolCallData{
-				ID:    "call_00_P6ma2c1021vGwXNjT4gp7549",
-				Name:  "get_weather",
-				Index: 0,
-			},
-		},
-		{
-			ID:    "1-1",
-			RunID: "run_1",
-			Type:  einoai.EventToolCall,
-			Data: einoai.ToolCallData{
-				ID:        "call_00_P6ma2c1021vGwXNjT4gp7549",
-				Name:      "get_weather",
-				Arguments: `{"location":"北京"}`,
-				Index:     0,
-			},
-		},
-		{
-			ID:    "1-2",
-			RunID: "run_1",
-			Type:  einoai.EventFinish,
-			Data:  einoai.FinishData{FinishReason: "tool_calls"},
-		},
+		{RunID: "run_1", Type: einoai.EventReasoningDelta, Data: einoai.ReasoningData{Delta: "think"}},
+		{RunID: "run_1", Type: einoai.EventToolCall, Data: einoai.ToolCallData{ID: "call_1", Name: "get_weather", Arguments: `{"location":"北京"}`, Index: 0}},
+		{RunID: "run_1", Type: einoai.EventFinish, Data: einoai.FinishData{FinishReason: "tool_calls"}},
+		{RunID: "run_1", Type: einoai.EventToolResult, Data: einoai.ToolResultData{ToolCallID: "call_1", Name: "get_weather", Content: "sunny"}},
+		{RunID: "run_1", Type: einoai.EventTextDelta, Data: einoai.TextData{Delta: "sunny"}},
+		{RunID: "run_1", Type: einoai.EventFinish, Data: einoai.FinishData{FinishReason: "stop"}},
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	chunks := decodeChunks(t, buf.String())
-	if len(chunks) != 4 {
-		t.Fatalf("expected role, tool start, tool args, finish chunks, got %d", len(chunks))
+	if len(chunks) != 3 {
+		t.Fatalf("expected role, final text and terminal finish chunks, got %d: %#v", len(chunks), chunks)
 	}
-
-	start := chunks[1].Choices[0].Delta.ToolCalls[0]
-	if start.ID != "call_00_P6ma2c1021vGwXNjT4gp7549" || start.Type != "function" || start.Function.Name != "get_weather" {
-		t.Fatalf("unexpected tool start delta: %#v", start)
+	if chunks[1].Choices[0].Delta.Content != "sunny" || chunks[2].Choices[0].FinishReason != "stop" {
+		t.Fatalf("unexpected strict OpenAI stream: %#v", chunks)
 	}
-	if start.Function.Arguments != "" {
-		t.Fatalf("tool start should not include arguments, got %#v", start)
-	}
-
-	args := chunks[2].Choices[0].Delta.ToolCalls[0]
-	if args.ID != "" || args.Type != "" || args.Function.Name != "" {
-		t.Fatalf("arguments delta should not repeat id/type/name: %#v", args)
-	}
-	if args.Function.Arguments != `{"location":"北京"}` {
-		t.Fatalf("unexpected arguments delta: %#v", args)
-	}
-
-	if chunks[3].Choices[0].FinishReason != "tool_calls" {
-		t.Fatalf("expected tool_calls finish reason, got %#v", chunks[3].Choices[0].FinishReason)
+	body := buf.String()
+	if strings.Contains(body, "reasoning_content") || strings.Contains(body, "tool_calls") {
+		t.Fatalf("internal Eino reasoning/tool steps leaked into Chat Completions wire: %s", body)
 	}
 }
 
 func TestWriteChatCompletionStreamWritesUsageChunkWhenRequested(t *testing.T) {
 	var buf bytes.Buffer
 
-	err := WriteChatCompletionStreamTo(context.Background(), &buf, nil, ChatCompletionsRequest{
+	_, err := WriteChatCompletionStreamTo(context.Background(), &buf, nil, ChatCompletionsRequest{
 		Model:  "gpt-4o",
 		Stream: true,
 		StreamOptions: &StreamOptions{
@@ -164,7 +130,7 @@ func TestWriteChatCompletionStreamWritesUsageChunkWhenRequested(t *testing.T) {
 
 func TestWriteChatCompletionStreamToWritesWithoutGin(t *testing.T) {
 	var buf bytes.Buffer
-	err := WriteChatCompletionStreamTo(context.Background(), &buf, nil, ChatCompletionsRequest{
+	_, err := WriteChatCompletionStreamTo(context.Background(), &buf, nil, ChatCompletionsRequest{
 		Model:  "gpt-4o",
 		Stream: true,
 	}, &sliceEventStream{events: []*einoai.RunEvent{
@@ -197,9 +163,32 @@ func TestWriteChatCompletionStreamToWritesWithoutGin(t *testing.T) {
 	}
 }
 
-func TestWriteChatCompletionStreamUsesDataLinesOnly(t *testing.T) {
+func TestWriteChatCompletionStreamAlwaysUsesSSEWhenRequestStreamIsFalse(t *testing.T) {
 	var buf bytes.Buffer
-	err := WriteChatCompletionStreamTo(context.Background(), &buf, nil, ChatCompletionsRequest{
+	_, err := WriteChatCompletionStreamTo(context.Background(), &buf, nil, ChatCompletionsRequest{
+		Model:  "gpt-4o",
+		Stream: false,
+	}, &sliceEventStream{events: []*einoai.RunEvent{
+		{RunID: "run_1", Type: einoai.EventTextDelta, Data: einoai.TextData{Delta: "hello"}},
+		{RunID: "run_1", Type: einoai.EventFinish, Data: einoai.FinishData{FinishReason: "stop"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := buf.String()
+	if !strings.HasPrefix(body, "data: ") || !strings.HasSuffix(body, "data: [DONE]\n\n") {
+		t.Fatalf("completions must always use SSE regardless of req.Stream:\n%s", body)
+	}
+	chunks := decodeChunks(t, body)
+	if len(chunks) != 3 || chunks[1].Choices[0].Delta.Content != "hello" || chunks[2].Choices[0].FinishReason != "stop" {
+		t.Fatalf("unexpected Chat Completions SSE chunks: %#v", chunks)
+	}
+}
+
+func TestWriteChatCompletionStreamUsesStrictDataLinesOnly(t *testing.T) {
+	var buf bytes.Buffer
+	_, err := WriteChatCompletionStreamTo(context.Background(), &buf, nil, ChatCompletionsRequest{
 		Model:  "gpt-4o",
 		Stream: true,
 	}, &sliceEventStream{events: []*einoai.RunEvent{
@@ -212,22 +201,22 @@ func TestWriteChatCompletionStreamUsesDataLinesOnly(t *testing.T) {
 	if strings.Contains(buf.String(), "id: ") {
 		t.Fatalf("unexpected SSE id field:\n%s", buf.String())
 	}
-	if !strings.Contains(buf.String(), `"reasoning_content":"think"`) {
-		t.Fatalf("reasoning chunk missing:\n%s", buf.String())
+	if strings.Contains(buf.String(), "reasoning_content") {
+		t.Fatalf("non-standard reasoning_content leaked into OpenAI stream:\n%s", buf.String())
 	}
 }
 
-func TestWriteChatCompletionStreamOrdersReasoningToolsFinishAndUsage(t *testing.T) {
+func TestWriteChatCompletionStreamKeepsInternalAgentStepsOutOfWireAndFinalUsageLast(t *testing.T) {
 	var buf bytes.Buffer
-	err := WriteChatCompletionStreamTo(context.Background(), &buf, nil, ChatCompletionsRequest{
+	_, err := WriteChatCompletionStreamTo(context.Background(), &buf, nil, ChatCompletionsRequest{
 		Model:         "gpt-4o",
 		Stream:        true,
 		StreamOptions: &StreamOptions{IncludeUsage: true},
 	}, &sliceEventStream{events: []*einoai.RunEvent{
 		{Type: einoai.EventReasoningDelta, Data: einoai.ReasoningData{Delta: "think"}},
-		{Type: einoai.EventToolCall, Data: einoai.ToolCallData{ID: "call_1", Name: "weather", Index: 0}},
 		{Type: einoai.EventToolCall, Data: einoai.ToolCallData{ID: "call_1", Name: "weather", Arguments: `{"city":"郑州"}`, Index: 0}},
 		{Type: einoai.EventFinish, Data: einoai.FinishData{FinishReason: "tool_calls"}},
+		{Type: einoai.EventToolResult, Data: einoai.ToolResultData{ToolCallID: "call_1", Name: "weather", Content: "sunny"}},
 		{Type: einoai.EventTextDelta, Data: einoai.TextData{Delta: "sunny"}},
 		{Type: einoai.EventFinish, Data: einoai.FinishData{
 			FinishReason: "stop",
@@ -238,34 +227,33 @@ func TestWriteChatCompletionStreamOrdersReasoningToolsFinishAndUsage(t *testing.
 		t.Fatal(err)
 	}
 	chunks := decodeChunks(t, buf.String())
-	if len(chunks) != 8 {
-		t.Fatalf("expected 8 ordered chunks, got %d: %#v", len(chunks), chunks)
+	if len(chunks) != 4 {
+		t.Fatalf("expected role, text, finish, usage chunks, got %d: %#v", len(chunks), chunks)
 	}
-	if chunks[0].Choices[0].Delta.Role != "assistant" || chunks[1].Choices[0].Delta.ReasoningContent != "think" {
-		t.Fatalf("role/reasoning order is wrong: %#v", chunks[:2])
+	if chunks[0].Choices[0].Delta.Role != "assistant" || chunks[1].Choices[0].Delta.Content != "sunny" || chunks[2].Choices[0].FinishReason != "stop" {
+		t.Fatalf("strict final response order is wrong: %#v", chunks)
 	}
-	if chunks[2].Choices[0].Delta.ToolCalls[0].ID != "call_1" || chunks[3].Choices[0].Delta.ToolCalls[0].Function.Arguments == "" {
-		t.Fatalf("tool deltas are wrong: %#v", chunks[2:4])
-	}
-	if chunks[4].Choices[0].FinishReason != "tool_calls" || chunks[6].Choices[0].FinishReason != "stop" {
-		t.Fatalf("finish chunks are wrong: %#v %#v", chunks[4], chunks[6])
-	}
-	final := chunks[7]
+	final := chunks[3]
 	if len(final.Choices) != 0 || final.Usage == nil || final.Usage.TotalTokens != 7 {
 		t.Fatalf("final usage chunk is wrong: %#v", final)
+	}
+	if strings.Contains(buf.String(), "reasoning_content") || strings.Contains(buf.String(), "tool_calls") {
+		t.Fatalf("internal agent steps leaked into strict OpenAI wire: %s", buf.String())
 	}
 	if !strings.HasSuffix(buf.String(), "data: [DONE]\n\n") {
 		t.Fatalf("DONE is not last:\n%s", buf.String())
 	}
 }
 
-func TestCollectChatCompletionIncludesReasoningToolsAndUsage(t *testing.T) {
-	body, err := CollectChatCompletion(context.Background(), ChatCompletionsRequest{Model: "gpt-4o"}, &sliceEventStream{events: []*einoai.RunEvent{
+func TestCollectChatCompletionUsesStrictFinalMessageAndPreservesUsage(t *testing.T) {
+	body, _, err := CollectChatCompletion(context.Background(), ChatCompletionsRequest{Model: "gpt-4o"}, &sliceEventStream{events: []*einoai.RunEvent{
 		{Type: einoai.EventReasoningDelta, Data: einoai.ReasoningData{Delta: "think"}},
-		{Type: einoai.EventToolCall, Data: einoai.ToolCallData{ID: "call_1", Name: "weather", Index: 0}},
 		{Type: einoai.EventToolCall, Data: einoai.ToolCallData{ID: "call_1", Name: "weather", Arguments: `{"city":"郑州"}`, Index: 0}},
+		{Type: einoai.EventFinish, Data: einoai.FinishData{FinishReason: "tool_calls"}},
+		{Type: einoai.EventToolResult, Data: einoai.ToolResultData{ToolCallID: "call_1", Name: "weather", Content: "sunny"}},
+		{Type: einoai.EventTextDelta, Data: einoai.TextData{Delta: "It is sunny."}},
 		{Type: einoai.EventFinish, Data: einoai.FinishData{
-			FinishReason: "tool_calls",
+			FinishReason: "stop",
 			Usage:        &schema.TokenUsage{PromptTokens: 5, CompletionTokens: 2, TotalTokens: 7},
 		}},
 	}})
@@ -274,12 +262,14 @@ func TestCollectChatCompletionIncludesReasoningToolsAndUsage(t *testing.T) {
 	}
 	choices := body["choices"].([]map[string]any)
 	message := choices[0]["message"].(map[string]any)
-	toolCalls, ok := message["tool_calls"].([]ToolCall)
-	if message["reasoning_content"] != "think" || !ok || len(toolCalls) != 1 {
-		t.Fatalf("missing completion data: %#v", body)
+	if message["content"] != "It is sunny." {
+		t.Fatalf("final content missing: %#v", body)
 	}
-	if toolCalls[0].Function.Arguments != `{"city":"郑州"}` {
-		t.Fatalf("tool arguments missing: %#v", toolCalls)
+	if _, ok := message["reasoning_content"]; ok {
+		t.Fatalf("non-standard reasoning_content leaked into aggregate OpenAI response: %#v", body)
+	}
+	if _, ok := message["tool_calls"]; ok {
+		t.Fatalf("server-executed tool calls leaked into aggregate OpenAI response: %#v", body)
 	}
 	completionUsage, ok := body["usage"].(*usage)
 	if !ok || completionUsage.TotalTokens != 7 {
@@ -288,7 +278,7 @@ func TestCollectChatCompletionIncludesReasoningToolsAndUsage(t *testing.T) {
 }
 
 func TestCollectChatCompletionOmitsAutomaticallyExecutedIntermediateTools(t *testing.T) {
-	body, err := CollectChatCompletion(context.Background(), ChatCompletionsRequest{Model: "gpt-4o"}, &sliceEventStream{events: []*einoai.RunEvent{
+	body, _, err := CollectChatCompletion(context.Background(), ChatCompletionsRequest{Model: "gpt-4o"}, &sliceEventStream{events: []*einoai.RunEvent{
 		{Type: einoai.EventToolCall, Data: einoai.ToolCallData{ID: "call_1", Name: "weather", Arguments: `{}`, Index: 0}},
 		{Type: einoai.EventFinish, Data: einoai.FinishData{FinishReason: "tool_calls"}},
 		{Type: einoai.EventToolResult, Data: einoai.ToolResultData{ToolCallID: "call_1", Name: "weather", Content: "sunny"}},
@@ -304,6 +294,29 @@ func TestCollectChatCompletionOmitsAutomaticallyExecutedIntermediateTools(t *tes
 	}
 	if message["content"] != "It is sunny." {
 		t.Fatalf("final content missing: %#v", message)
+	}
+}
+
+func TestWriteChatCompletionStreamReturnsCompleteEinoOutput(t *testing.T) {
+	var buf bytes.Buffer
+	want := []*schema.Message{
+		{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "call_1", Type: "function", Function: schema.FunctionCall{Name: "weather", Arguments: `{}`}}}},
+		{Role: schema.Tool, ToolCallID: "call_1", ToolName: "weather", Content: `{"temp":26}`},
+		{Role: schema.Assistant, Content: "26°C"},
+	}
+
+	got, err := WriteChatCompletionStreamTo(context.Background(), &buf, nil, ChatCompletionsRequest{Model: "gpt-4o"}, &sliceEventStream{events: []*einoai.RunEvent{
+		{RunID: "run_1", Type: einoai.EventTextDelta, Data: einoai.TextData{Delta: "26°C"}},
+		{RunID: "run_1", Type: einoai.EventFinish, Data: einoai.FinishData{FinishReason: "stop", Output: want}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d output messages, got %#v", len(want), got)
+	}
+	if got[0].ToolCalls[0].ID != "call_1" || got[1].Role != schema.Tool || got[2].Content != "26°C" {
+		t.Fatalf("complete Eino output was not returned: %#v", got)
 	}
 }
 
@@ -326,7 +339,7 @@ func TestConvertUsagePreservesNormalizedDetails(t *testing.T) {
 
 func TestWriteChatCompletionStreamTreatsContextCancellationAsClientDisconnect(t *testing.T) {
 	var buf bytes.Buffer
-	err := WriteChatCompletionStreamTo(
+	_, err := WriteChatCompletionStreamTo(
 		context.Background(),
 		&buf,
 		nil,
@@ -360,4 +373,46 @@ func decodeChunks(t *testing.T, body string) []chatCompletionChunk {
 		chunks = append(chunks, chunk)
 	}
 	return chunks
+}
+
+func TestWriteChatCompletionStreamReturnsOutputAfterRunError(t *testing.T) {
+	var buf bytes.Buffer
+	want := []*schema.Message{{Role: schema.Assistant, Content: "partial"}}
+
+	got, err := WriteChatCompletionStreamTo(context.Background(), &buf, nil, ChatCompletionsRequest{Model: "gpt-4o"}, &sliceEventStream{events: []*einoai.RunEvent{
+		{RunID: "run_1", Type: einoai.EventTextDelta, Data: einoai.TextData{Delta: "partial"}},
+		{RunID: "run_1", Type: einoai.EventError, Data: einoai.ErrorData{Message: "boom"}},
+		{RunID: "run_1", Type: einoai.EventFinish, Data: einoai.FinishData{FinishReason: "error", Output: want}},
+	}})
+	if err == nil || err.Error() != "boom" {
+		t.Fatalf("expected run error after stream terminates, got %v", err)
+	}
+	if len(got) != 1 || got[0].Content != "partial" {
+		t.Fatalf("expected partial Eino output after error, got %#v", got)
+	}
+	body := buf.String()
+	if !strings.Contains(body, `"type":"server_error"`) || !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("expected streamed error followed by DONE, got:\n%s", body)
+	}
+	if strings.Contains(body, `"finish_reason":"error"`) {
+		t.Fatalf("internal error reason leaked into OpenAI finish_reason: %s", body)
+	}
+}
+
+func TestCollectChatCompletionReturnsOutputAfterRunError(t *testing.T) {
+	want := []*schema.Message{{Role: schema.Assistant, Content: "partial"}}
+	body, got, err := CollectChatCompletion(context.Background(), ChatCompletionsRequest{Model: "gpt-4o"}, &sliceEventStream{events: []*einoai.RunEvent{
+		{Type: einoai.EventTextDelta, Data: einoai.TextData{Delta: "partial"}},
+		{Type: einoai.EventError, Data: einoai.ErrorData{Message: "boom"}},
+		{Type: einoai.EventFinish, Data: einoai.FinishData{FinishReason: "error", Output: want}},
+	}})
+	if err == nil || err.Error() != "boom" {
+		t.Fatalf("expected run error, got %v", err)
+	}
+	if body != nil {
+		t.Fatalf("failed collection must not return a successful completion body: %#v", body)
+	}
+	if len(got) != 1 || got[0].Content != "partial" {
+		t.Fatalf("expected partial Eino output after error, got %#v", got)
+	}
 }

@@ -59,17 +59,11 @@ func (a *app) openAICompletions(c *gin.Context) {
 		_ = stream.Close()
 	}()
 
-	if req.Stream {
-		openai.SetChatCompletionStreamHeaders(c.Writer.Header())
-		_ = openai.WriteChatCompletionStreamTo(c.Request.Context(), c.Writer, c.Writer.Flush, req, stream)
-		return
-	}
-	body, err := openai.CollectChatCompletion(c.Request.Context(), req, stream)
-	if err != nil {
-		writeOpenAIError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, body)
+	// This package always exposes completions as an OpenAI-compatible SSE stream.
+	// req.Stream is intentionally ignored; callers that need to persist the Eino
+	// output can use the messages returned by WriteChatCompletionStreamTo.
+	openai.SetChatCompletionStreamHeaders(c.Writer.Header())
+	_, _ = openai.WriteChatCompletionStreamTo(c.Request.Context(), c.Writer, c.Writer.Flush, req, stream)
 }
 
 func (a *app) createOpenAIRun(c *gin.Context) {
@@ -140,7 +134,7 @@ func (a *app) subscribeOpenAIEvents(c *gin.Context) {
 
 	req := openAISubscribeRequest(c)
 	openai.SetChatCompletionStreamHeaders(c.Writer.Header())
-	_ = openai.WriteChatCompletionStreamTo(c.Request.Context(), c.Writer, c.Writer.Flush, req, stream)
+	_, _ = openai.WriteChatCompletionStreamTo(c.Request.Context(), c.Writer, c.Writer.Flush, req, stream)
 }
 
 func openAISubscribeRequest(c *gin.Context) openai.ChatCompletionsRequest {

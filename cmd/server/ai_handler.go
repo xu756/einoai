@@ -57,7 +57,7 @@ func (a *app) aiCompletions(c *gin.Context) {
 		_ = stream.Close()
 	}()
 	aisdk.SetEventStreamHeaders(c.Writer.Header())
-	_ = aisdk.WriteEventStreamTo(c.Request.Context(), c.Writer, c.Writer.Flush, stream)
+	_, _ = aisdk.WriteEventStreamTo(c.Request.Context(), c.Writer, c.Writer.Flush, stream)
 }
 
 func (a *app) createAIRun(c *gin.Context) {
@@ -127,7 +127,7 @@ func (a *app) subscribeAIEvents(c *gin.Context) {
 		_ = stream.Close()
 	}()
 	aisdk.SetEventStreamHeaders(c.Writer.Header())
-	_ = aisdk.WriteEventStreamTo(c.Request.Context(), c.Writer, c.Writer.Flush, stream)
+	_, _ = aisdk.WriteEventStreamTo(c.Request.Context(), c.Writer, c.Writer.Flush, stream)
 }
 
 func (a *app) deleteAISession(c *gin.Context) {

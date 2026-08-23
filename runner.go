@@ -265,7 +265,11 @@ func (b *runEventBuilder) writeFinish(ctx context.Context, reason string, usage 
 	if err := b.commitAssistantMessage(); err != nil {
 		return err
 	}
-	if err := b.service.appendFinish(ctx, b.sessionID, b.runID, reason, b.usage); err != nil {
+	var output []*schema.Message
+	if reason != "tool_calls" {
+		output = cloneMessages(b.outputMessages)
+	}
+	if err := b.service.appendFinish(ctx, b.sessionID, b.runID, reason, b.usage, output); err != nil {
 		return err
 	}
 	if reason == "tool_calls" {

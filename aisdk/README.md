@@ -29,7 +29,8 @@ stream, err := svc.SubscribeEvents(ctx, einoai.SubscribeRequest{
 })
 defer stream.Close()
 aisdk.SetEventStreamHeaders(w.Header())
-err = aisdk.WriteEventStreamTo(ctx, w, flush, stream)
+output, err := aisdk.WriteEventStreamTo(ctx, w, flush, stream)
+// output 是当前 run 完整的 []*schema.Message，可直接交给主程序保存。
 ```
 
 `OnCompleted` 只在正常完成时调用；取消和异常不会调用。hook 错误不会改变 run 状态，应用应自行处理幂等、超时和重试。
@@ -40,7 +41,7 @@ err = aisdk.WriteEventStreamTo(ctx, w, flush, stream)
 - `NewRunResponse(run)` 返回只包含 run metadata 的状态响应，不包含 history。
 - `NewCancelResponse()` 和 `NewDeleteSessionResponse()` 返回 `{ "ok": true }`。
 
-`GET /sessions/:sessionId` 的 history 应由应用自己的 endpoint 查询。实时 stream 仍会返回完整的 text、reasoning、tool 和 finish 事件。
+`GET /sessions/:sessionId` 的 history 应由应用自己的 endpoint 查询。实时 stream 使用 UI Message Stream 的 text、reasoning、provider-executed tool、finish/error/abort 事件；Eino 完整输出同时由 writer 以 `[]*schema.Message` 返回。
 
 
 ## Run 查询与生命周期

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -33,22 +32,8 @@ type choice struct {
 }
 
 type delta struct {
-	Role             string          `json:"role,omitempty"`
-	Content          string          `json:"content,omitempty"`
-	ReasoningContent string          `json:"reasoning_content,omitempty"`
-	ToolCalls        []toolCallDelta `json:"tool_calls,omitempty"`
-}
-
-type toolCallDelta struct {
-	Index    int               `json:"index"`
-	ID       string            `json:"id,omitempty"`
-	Type     string            `json:"type,omitempty"`
-	Function functionCallDelta `json:"function"`
-}
-
-type functionCallDelta struct {
-	Name      string `json:"name,omitempty"`
-	Arguments string `json:"arguments,omitempty"`
+	Role    string `json:"role,omitempty"`
+	Content string `json:"content,omitempty"`
 }
 
 type usage struct {
@@ -72,7 +57,7 @@ type streamState struct {
 	created      int64
 	modelName    string
 	includeUsage bool
-	toolCalls    map[string]bool
+	runErr       error
 }
 
 // FlushFunc flushes buffered stream data to the client.
@@ -92,34 +77,50 @@ func SetChatCompletionStreamHeaders(header http.Header) {
 }
 
 // WriteChatCompletionStreamTo writes OpenAI-compatible SSE chunks to any writer.
-func WriteChatCompletionStreamTo(ctx context.Context, writer io.Writer, flush FlushFunc, req ChatCompletionsRequest, stream einoai.EventStream) error {
+//
+// The returned messages are the complete Eino output messages for the run. They
+// are not written into the OpenAI wire protocol; callers can persist them after
+// the stream finishes.
+func WriteChatCompletionStreamTo(ctx context.Context, writer io.Writer, flush FlushFunc, req ChatCompletionsRequest, stream einoai.EventStream) ([]*schema.Message, error) {
 	out := chatCompletionStreamWriter{writer: writer, flush: flush}
 	state := newStreamState(req)
+	var output []*schema.Message
 	if err := out.writeChunk(state.chunk([]choice{{Index: 0, Delta: delta{Role: "assistant"}, FinishReason: nil}}, nil)); err != nil {
-		return err
+		return nil, err
 	}
 
 	for {
 		ev, err := stream.Next(ctx)
 		if err == io.EOF {
-			return out.writeDone()
+			if writeErr := out.writeDone(); writeErr != nil {
+				return output, writeErr
+			}
+			return output, state.runErr
 		}
 		if errors.Is(err, context.Canceled) {
-			return nil
+			return output, nil
 		}
 		if err != nil {
 			_ = out.writeStreamError(err)
-			return err
+			return output, err
 		}
 		if ev == nil {
 			continue
 		}
+		if ev.Type == einoai.EventFinish {
+			if data, ok := einoai.DecodeEventData[einoai.FinishData](ev); ok && data.FinishReason != "tool_calls" && data.FinishReason != "tool-calls" && data.Output != nil {
+				output = data.Output
+			}
+		}
 		done, err := writeEvent(out, state, ev)
 		if err != nil {
-			return err
+			return output, err
 		}
 		if done {
-			return out.writeDone()
+			if writeErr := out.writeDone(); writeErr != nil {
+				return output, writeErr
+			}
+			return output, state.runErr
 		}
 	}
 }
@@ -135,7 +136,6 @@ func newStreamState(req ChatCompletionsRequest) *streamState {
 		created:      time.Now().Unix(),
 		modelName:    modelName,
 		includeUsage: includeUsage,
-		toolCalls:    make(map[string]bool),
 	}
 }
 
@@ -188,12 +188,14 @@ func (c chatCompletionChunk) MarshalJSON() ([]byte, error) {
 	})
 }
 
-// CollectChatCompletion aggregates a non-streaming response body.
-func CollectChatCompletion(ctx context.Context, req ChatCompletionsRequest, stream einoai.EventStream) (map[string]any, error) {
+// CollectChatCompletion aggregates the protocol-level final response while also
+// returning the complete Eino output messages. HTTP handlers do not use this to
+// switch response modes; completions are always streamed.
+func CollectChatCompletion(ctx context.Context, req ChatCompletionsRequest, stream einoai.EventStream) (map[string]any, []*schema.Message, error) {
+	var output []*schema.Message
 	var content strings.Builder
-	var reasoning strings.Builder
-	toolCalls := make(map[int]*ToolCall)
 	var finalUsage *usage
+	var streamErr error
 	finishReason := "stop"
 	for {
 		ev, err := stream.Next(ctx)
@@ -201,7 +203,7 @@ func CollectChatCompletion(ctx context.Context, req ChatCompletionsRequest, stre
 			break
 		}
 		if err != nil {
-			return nil, err
+			return nil, output, err
 		}
 		if ev == nil {
 			continue
@@ -210,68 +212,35 @@ func CollectChatCompletion(ctx context.Context, req ChatCompletionsRequest, stre
 		case einoai.EventTextDelta:
 			data, _ := einoai.DecodeEventData[einoai.TextData](ev)
 			content.WriteString(data.Delta)
-		case einoai.EventReasoningDelta:
-			data, _ := einoai.DecodeEventData[einoai.ReasoningData](ev)
-			reasoning.WriteString(data.Delta)
-		case einoai.EventToolCall:
-			data, _ := einoai.DecodeEventData[einoai.ToolCallData](ev)
-			call := toolCalls[data.Index]
-			if call == nil {
-				index := data.Index
-				call = &ToolCall{
-					ID:    data.ID,
-					Type:  "function",
-					Index: &index,
-					Function: FunctionCall{
-						Name: data.Name,
-					},
-				}
-				toolCalls[data.Index] = call
-			}
-			if data.ID != "" {
-				call.ID = data.ID
-			}
-			if data.Name != "" {
-				call.Function.Name = data.Name
-			}
-			call.Function.Arguments += data.Arguments
-		case einoai.EventToolResult:
-			toolCalls = make(map[int]*ToolCall)
+		case einoai.EventReasoningDelta, einoai.EventToolCall, einoai.EventToolResult:
+			// Chat Completions has no standard server-executed agent-step or raw
+			// reasoning event. Keep those details in FinishData.Output instead of
+			// leaking provider-specific fields into the OpenAI wire response.
 		case einoai.EventFinish:
 			data, _ := einoai.DecodeEventData[einoai.FinishData](ev)
+			if data.FinishReason == "tool_calls" || data.FinishReason == "tool-calls" {
+				continue
+			}
 			if data.FinishReason != "" {
 				finishReason = normalizeFinishReason(data.FinishReason)
 			}
 			if data.Usage != nil {
 				finalUsage = convertUsage(data.Usage)
 			}
+			if data.Output != nil {
+				output = data.Output
+			}
 		case einoai.EventError:
 			data, _ := einoai.DecodeEventData[einoai.ErrorData](ev)
-			return nil, fmt.Errorf("%s", data.Message)
+			streamErr = fmt.Errorf("%s", data.Message)
 		}
 	}
-	indexes := make([]int, 0, len(toolCalls))
-	for index := range toolCalls {
-		indexes = append(indexes, index)
-	}
-	sort.Ints(indexes)
-	orderedCalls := make([]ToolCall, 0, len(indexes))
-	for _, index := range indexes {
-		orderedCalls = append(orderedCalls, *toolCalls[index])
-	}
-	contentValue := any(content.String())
-	if len(orderedCalls) > 0 && content.Len() == 0 {
-		contentValue = nil
+	if streamErr != nil {
+		return nil, output, streamErr
 	}
 	message := map[string]any{
 		"role":    "assistant",
-		"content": contentValue,
-	}
-	if reasoning.Len() > 0 {
-		message["reasoning_content"] = reasoning.String()
-	}
-	if len(orderedCalls) > 0 {
-		message["tool_calls"] = orderedCalls
+		"content": content.String(),
 	}
 	body := map[string]any{
 		"id":      "chatcmpl-" + fmt.Sprintf("%d", time.Now().UnixNano()),
@@ -287,7 +256,7 @@ func CollectChatCompletion(ctx context.Context, req ChatCompletionsRequest, stre
 	if finalUsage != nil {
 		body["usage"] = finalUsage
 	}
-	return body, nil
+	return body, output, nil
 }
 
 func writeEvent(w chatCompletionStreamWriter, state *streamState, ev *einoai.RunEvent) (bool, error) {
@@ -298,20 +267,31 @@ func writeEvent(w chatCompletionStreamWriter, state *streamState, ev *einoai.Run
 	case einoai.EventTextDelta:
 		data, _ := einoai.DecodeEventData[einoai.TextData](ev)
 		d.Content = data.Delta
-	case einoai.EventReasoningDelta:
-		data, _ := einoai.DecodeEventData[einoai.ReasoningData](ev)
-		d.ReasoningContent = data.Delta
-	case einoai.EventToolCall:
-		data, _ := einoai.DecodeEventData[einoai.ToolCallData](ev)
-		d.ToolCalls = []toolCallDelta{state.toolCallDelta(data)}
-	case einoai.EventToolResult:
+	case einoai.EventReasoningStart, einoai.EventReasoningDelta, einoai.EventReasoningEnd,
+		einoai.EventToolCall, einoai.EventToolResult:
+		// Eino agent reasoning and server-executed tools are internal agent
+		// steps. Chat Completions does not define a provider-executed tool-step
+		// lifecycle, so these are intentionally omitted from the wire stream.
 		return false, nil
 	case einoai.EventFinish:
 		data, _ := einoai.DecodeEventData[einoai.FinishData](ev)
 		if data.FinishReason != "" {
 			finishReason = normalizeFinishReason(data.FinishReason)
 		}
-		if finishReason != "tool_calls" && state.includeUsage {
+		// Tool calls are executed inside the Eino agent. An intermediate
+		// tool_calls finish marker would prematurely terminate an OpenAI client
+		// choice, so only the terminal agent step gets a finish_reason.
+		if finishReason == "tool_calls" {
+			return false, nil
+		}
+		// A run failure is sent as an OpenAI-compatible error payload first. The
+		// following internal finish event only exists so we can collect the exact
+		// Eino output messages; do not leak the internal "error" reason as an
+		// invalid ChatCompletion finish_reason.
+		if state.runErr != nil {
+			return true, nil
+		}
+		if state.includeUsage {
 			if err := w.writeChunk(state.chunk([]choice{{Index: 0, Delta: d, FinishReason: finishReason}}, nil)); err != nil {
 				return false, err
 			}
@@ -325,7 +305,8 @@ func writeEvent(w chatCompletionStreamWriter, state *streamState, ev *einoai.Run
 		if err := w.writeErrorData(data.Message); err != nil {
 			return false, err
 		}
-		return true, nil
+		state.runErr = errors.New(data.Message)
+		return false, nil
 	default:
 		return false, nil
 	}
@@ -336,30 +317,23 @@ func writeEvent(w chatCompletionStreamWriter, state *streamState, ev *einoai.Run
 	return ev.Type == einoai.EventFinish && finishReason != "tool_calls", nil
 }
 
-func (s *streamState) toolCallDelta(data einoai.ToolCallData) toolCallDelta {
-	out := toolCallDelta{
-		Index: data.Index,
-		Function: functionCallDelta{
-			Arguments: data.Arguments,
-		},
-	}
-	if !s.toolCalls[data.ID] {
-		out.ID = data.ID
-		out.Type = "function"
-		out.Function.Name = data.Name
-		s.toolCalls[data.ID] = true
-	}
-	return out
-}
-
 func normalizeFinishReason(reason string) string {
 	switch reason {
-	case "tool-calls":
+	case "", "stop":
+		return "stop"
+	case "length":
+		return "length"
+	case "tool_calls", "tool-calls":
 		return "tool_calls"
-	case "content-filter":
+	case "content_filter", "content-filter":
 		return "content_filter"
+	case "function_call", "function-call":
+		return "function_call"
 	default:
-		return reason
+		// Internal reasons such as cancelled/error are not valid OpenAI
+		// ChatCompletion finish reasons. Error runs are handled separately;
+		// cancellation is represented as an ordinary stopped stream.
+		return "stop"
 	}
 }
 
