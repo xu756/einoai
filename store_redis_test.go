@@ -7,8 +7,56 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/cloudwego/eino/schema"
 	"github.com/redis/go-redis/v9"
 )
+
+func TestRedisStoreFinishRunAtomicallyPersistsTerminalState(t *testing.T) {
+	store, cleanup, srv := newTestRedisStoreWithServer(t, time.Hour)
+	defer cleanup()
+
+	ctx := context.Background()
+	run := &RunInfo{SessionID: "s1", RunID: "r1", Status: RunStatusRunning}
+	if err := store.initRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	usage := &schema.TokenUsage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5}
+	event, err := store.finishRun(ctx, RunEvent{
+		SessionID: "s1",
+		RunID:     "r1",
+		Type:      EventFinish,
+		Data:      FinishData{FinishReason: "stop", Usage: usage},
+	}, RunStatusCompleted, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event == nil || event.ID == "" {
+		t.Fatalf("expected persisted finish event, got %#v", event)
+	}
+	finished, err := store.getRun(ctx, "s1", "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished == nil || finished.Status != RunStatusCompleted {
+		t.Fatalf("expected completed metadata, got %#v", finished)
+	}
+	if srv.Exists(currentRunKey("s1")) {
+		t.Fatal("terminal finalization did not clear current_run")
+	}
+	events, err := store.readAfter(ctx, "s1", "r1", "0-0", 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Type != EventFinish {
+		t.Fatalf("expected one terminal event, got %#v", events)
+	}
+	if ttl := srv.TTL(runMetaKey("s1", "r1")); ttl != time.Hour {
+		t.Fatalf("expected terminal meta ttl one hour, got %s", ttl)
+	}
+	if ttl := srv.TTL(runEventsKey("s1", "r1")); ttl != time.Hour {
+		t.Fatalf("expected terminal events ttl one hour, got %s", ttl)
+	}
+}
 
 func newTestRedisStore(t *testing.T) (*redisStore, func()) {
 	t.Helper()

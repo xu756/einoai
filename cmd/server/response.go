@@ -6,7 +6,25 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/xu756/einoai"
+	"github.com/xu756/einoai/aisdk"
+	"github.com/xu756/einoai/openai"
 )
+
+func writeAIStreamError(c *gin.Context, err error) {
+	if err == nil {
+		return
+	}
+	aisdk.SetEventStreamHeaders(c.Writer.Header())
+	_ = aisdk.WriteEventStreamErrorTo(c.Writer, c.Writer.Flush, err)
+}
+
+func writeOpenAIStreamError(c *gin.Context, err error) {
+	if err == nil {
+		return
+	}
+	openai.SetChatCompletionStreamHeaders(c.Writer.Header())
+	_ = openai.WriteChatCompletionStreamErrorTo(c.Writer, c.Writer.Flush, err)
+}
 
 func writeAIError(c *gin.Context, err error) {
 	if err == nil {

@@ -76,15 +76,22 @@ func SetChatCompletionStreamHeaders(header http.Header) {
 	header.Set("X-Accel-Buffering", "no")
 }
 
+// WriteChatCompletionStreamErrorTo writes an OpenAI-compatible SSE error and
+// terminal [DONE] marker. It is intended for failures that happen before an
+// EventStream can be created.
+func WriteChatCompletionStreamErrorTo(writer io.Writer, flush FlushFunc, err error) error {
+	return (chatCompletionStreamWriter{writer: writer, flush: flush}).writeStreamError(err)
+}
+
 // WriteChatCompletionStreamTo writes OpenAI-compatible SSE chunks to any writer.
 //
-// The returned messages are the complete Eino output messages for the run. They
-// are not written into the OpenAI wire protocol; callers can persist them after
-// the stream finishes.
-func WriteChatCompletionStreamTo(ctx context.Context, writer io.Writer, flush FlushFunc, req ChatCompletionsRequest, stream einoai.EventStream) ([]*schema.Message, error) {
+// The returned result contains complete or partial Eino output, cumulative token
+// usage, and the terminal finish reason. Internal messages are not written into
+// the OpenAI wire protocol; callers can persist them after the stream finishes.
+func WriteChatCompletionStreamTo(ctx context.Context, writer io.Writer, flush FlushFunc, req ChatCompletionsRequest, stream einoai.EventStream) (*einoai.StreamResult, error) {
 	out := chatCompletionStreamWriter{writer: writer, flush: flush}
 	state := newStreamState(req)
-	var output []*schema.Message
+	result := &einoai.StreamResult{}
 	if err := out.writeChunk(state.chunk([]choice{{Index: 0, Delta: delta{Role: "assistant"}, FinishReason: nil}}, nil)); err != nil {
 		return nil, err
 	}
@@ -93,34 +100,38 @@ func WriteChatCompletionStreamTo(ctx context.Context, writer io.Writer, flush Fl
 		ev, err := stream.Next(ctx)
 		if err == io.EOF {
 			if writeErr := out.writeDone(); writeErr != nil {
-				return output, writeErr
+				return result, writeErr
 			}
-			return output, state.runErr
+			return result, state.runErr
 		}
 		if errors.Is(err, context.Canceled) {
-			return output, nil
+			return result, nil
 		}
 		if err != nil {
 			_ = out.writeStreamError(err)
-			return output, err
+			return result, err
 		}
 		if ev == nil {
 			continue
 		}
 		if ev.Type == einoai.EventFinish {
-			if data, ok := einoai.DecodeEventData[einoai.FinishData](ev); ok && data.FinishReason != "tool_calls" && data.FinishReason != "tool-calls" && data.Output != nil {
-				output = data.Output
+			if data, ok := einoai.DecodeEventData[einoai.FinishData](ev); ok && data.FinishReason != "tool_calls" && data.FinishReason != "tool-calls" {
+				if data.Output != nil {
+					result.Output = data.Output
+				}
+				result.Usage = data.Usage
+				result.FinishReason = data.FinishReason
 			}
 		}
 		done, err := writeEvent(out, state, ev)
 		if err != nil {
-			return output, err
+			return result, err
 		}
 		if done {
 			if writeErr := out.writeDone(); writeErr != nil {
-				return output, writeErr
+				return result, writeErr
 			}
-			return output, state.runErr
+			return result, state.runErr
 		}
 	}
 }

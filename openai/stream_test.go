@@ -58,7 +58,6 @@ func TestWriteChatCompletionStreamHidesServerExecutedAgentSteps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	chunks := decodeChunks(t, buf.String())
 	if len(chunks) != 3 {
 		t.Fatalf("expected role, final text and terminal finish chunks, got %d: %#v", len(chunks), chunks)
@@ -75,7 +74,7 @@ func TestWriteChatCompletionStreamHidesServerExecutedAgentSteps(t *testing.T) {
 func TestWriteChatCompletionStreamWritesUsageChunkWhenRequested(t *testing.T) {
 	var buf bytes.Buffer
 
-	_, err := WriteChatCompletionStreamTo(context.Background(), &buf, nil, ChatCompletionsRequest{
+	result, err := WriteChatCompletionStreamTo(context.Background(), &buf, nil, ChatCompletionsRequest{
 		Model:  "gpt-4o",
 		Stream: true,
 		StreamOptions: &StreamOptions{
@@ -104,6 +103,9 @@ func TestWriteChatCompletionStreamWritesUsageChunkWhenRequested(t *testing.T) {
 	}})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if result.FinishReason != "stop" || result.Usage == nil || result.Usage.TotalTokens != 5 {
+		t.Fatalf("terminal result must retain usage even without output messages: %#v", result)
 	}
 
 	body := buf.String()
@@ -312,11 +314,14 @@ func TestWriteChatCompletionStreamReturnsCompleteEinoOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != len(want) {
+	if len(got.Output) != len(want) {
 		t.Fatalf("expected %d output messages, got %#v", len(want), got)
 	}
-	if got[0].ToolCalls[0].ID != "call_1" || got[1].Role != schema.Tool || got[2].Content != "26°C" {
+	if got.Output[0].ToolCalls[0].ID != "call_1" || got.Output[1].Role != schema.Tool || got.Output[2].Content != "26°C" {
 		t.Fatalf("complete Eino output was not returned: %#v", got)
+	}
+	if got.FinishReason != "stop" {
+		t.Fatalf("finish reason was not returned: %#v", got)
 	}
 }
 
@@ -382,13 +387,20 @@ func TestWriteChatCompletionStreamReturnsOutputAfterRunError(t *testing.T) {
 	got, err := WriteChatCompletionStreamTo(context.Background(), &buf, nil, ChatCompletionsRequest{Model: "gpt-4o"}, &sliceEventStream{events: []*einoai.RunEvent{
 		{RunID: "run_1", Type: einoai.EventTextDelta, Data: einoai.TextData{Delta: "partial"}},
 		{RunID: "run_1", Type: einoai.EventError, Data: einoai.ErrorData{Message: "boom"}},
-		{RunID: "run_1", Type: einoai.EventFinish, Data: einoai.FinishData{FinishReason: "error", Output: want}},
+		{RunID: "run_1", Type: einoai.EventFinish, Data: einoai.FinishData{
+			FinishReason: "error",
+			Output:       want,
+			Usage:        &schema.TokenUsage{PromptTokens: 4, CompletionTokens: 1, TotalTokens: 5},
+		}},
 	}})
 	if err == nil || err.Error() != "boom" {
 		t.Fatalf("expected run error after stream terminates, got %v", err)
 	}
-	if len(got) != 1 || got[0].Content != "partial" {
+	if len(got.Output) != 1 || got.Output[0].Content != "partial" {
 		t.Fatalf("expected partial Eino output after error, got %#v", got)
+	}
+	if got.Usage == nil || got.Usage.TotalTokens != 5 || got.FinishReason != "error" {
+		t.Fatalf("expected terminal usage and reason after error, got %#v", got)
 	}
 	body := buf.String()
 	if !strings.Contains(body, `"type":"server_error"`) || !strings.Contains(body, "data: [DONE]") {

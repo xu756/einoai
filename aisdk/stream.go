@@ -10,8 +10,6 @@ import (
 	"os"
 
 	"github.com/xu756/einoai"
-
-	"github.com/cloudwego/eino/schema"
 )
 
 type toolState struct {
@@ -48,56 +46,68 @@ func SetEventStreamHeaders(header http.Header) {
 	header.Set("x-vercel-ai-ui-message-stream", "v1")
 }
 
+// WriteEventStreamErrorTo writes an AI SDK UI Message Stream error and terminal
+// [DONE] marker. It is intended for failures that happen before an EventStream
+// can be created.
+func WriteEventStreamErrorTo(writer io.Writer, flush FlushFunc, err error) error {
+	return (eventStreamWriter{writer: writer, flush: flush}).writeStreamError(err)
+}
+
 // WriteEventStreamTo writes einoai events as AI SDK UI Message Stream SSE.
 //
-// The returned messages are the complete Eino output messages for the run. They
-// are kept out of the wire protocol so the caller can persist them directly.
-func WriteEventStreamTo(ctx context.Context, writer io.Writer, flush FlushFunc, stream einoai.EventStream) ([]*schema.Message, error) {
+// The returned result contains complete or partial Eino output, cumulative token
+// usage, and the terminal finish reason. It is kept out of the wire protocol so
+// the caller can persist it directly.
+func WriteEventStreamTo(ctx context.Context, writer io.Writer, flush FlushFunc, stream einoai.EventStream) (*einoai.StreamResult, error) {
 	out := eventStreamWriter{writer: writer, flush: flush}
 	state := newStreamState()
-	var output []*schema.Message
+	result := &einoai.StreamResult{}
 
 	for {
 		ev, err := stream.Next(ctx)
 		if err == io.EOF {
 			if writeErr := out.writeDone(); writeErr != nil {
-				return output, writeErr
+				return result, writeErr
 			}
-			return output, state.runErr
+			return result, state.runErr
 		}
 		if errors.Is(err, context.Canceled) {
-			return output, nil
+			return result, nil
 		}
 		if err != nil {
 			_ = out.writeStreamError(err)
-			return output, err
+			return result, err
 		}
 		if ev == nil {
 			continue
 		}
 		if ev.Type == einoai.EventFinish {
-			if data, ok := einoai.DecodeEventData[einoai.FinishData](ev); ok && data.FinishReason != "tool_calls" && data.FinishReason != "tool-calls" && data.Output != nil {
-				output = data.Output
+			if data, ok := einoai.DecodeEventData[einoai.FinishData](ev); ok && data.FinishReason != "tool_calls" && data.FinishReason != "tool-calls" {
+				if data.Output != nil {
+					result.Output = data.Output
+				}
+				result.Usage = data.Usage
+				result.FinishReason = data.FinishReason
 			}
 		}
 		if !state.started {
 			if err := out.writePart(ev.ID, map[string]any{"type": "start", "messageId": "msg_" + ev.RunID}); err != nil {
-				return output, err
+				return result, err
 			}
 			if err := out.writePart(ev.ID, map[string]any{"type": "start-step"}); err != nil {
-				return output, err
+				return result, err
 			}
 			state.started = true
 		}
 		done, err := writeEvent(out, state, ev)
 		if err != nil {
-			return output, err
+			return result, err
 		}
 		if done {
 			if writeErr := out.writeDone(); writeErr != nil {
-				return output, writeErr
+				return result, writeErr
 			}
-			return output, state.runErr
+			return result, state.runErr
 		}
 	}
 }

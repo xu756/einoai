@@ -18,7 +18,7 @@ run, err := svc.CreateRun(ctx, einoai.CreateRunRequest{
     SessionID: sessionID,
     Messages:  messages,
     Agent:     agent,
-    OnCompleted: func(ctx context.Context, result *einoai.RunResult) error {
+    OnTerminated: func(ctx context.Context, result *einoai.RunResult) error {
         return historyRepo.Replace(ctx, result.Run.SessionID, result.Messages)
     },
 })
@@ -29,11 +29,14 @@ stream, err := svc.SubscribeEvents(ctx, einoai.SubscribeRequest{
 })
 defer stream.Close()
 aisdk.SetEventStreamHeaders(w.Header())
-output, err := aisdk.WriteEventStreamTo(ctx, w, flush, stream)
-// output 是当前 run 完整的 []*schema.Message，可直接交给主程序保存。
+result, err := aisdk.WriteEventStreamTo(ctx, w, flush, stream)
+// result.Output 是完整/部分 Eino 输出；result.Usage 是整个 agent run 的累计 token usage。
+// 应用可将 result 落库；Redis run/event 数据按 1 小时 TTL 自动过期。
 ```
 
-`OnCompleted` 只在正常完成时调用；取消和异常不会调用。hook 错误不会改变 run 状态，应用应自行处理幂等、超时和重试。
+`OnCompleted` 只在正常完成时调用；`OnTerminated` 覆盖完成、取消和异常。hook 错误不会改变 run 状态，应用应自行处理幂等、超时和重试。
+
+completions 和 run 订阅在建立 `EventStream` 前失败时，也应调用 `WriteEventStreamErrorTo`，以 UI Message Stream error part 后接 `data: [DONE]` 结束。创建、查询、删除和取消 run 仍使用普通 HTTP JSON 错误。
 
 ## Response helpers
 
@@ -41,7 +44,7 @@ output, err := aisdk.WriteEventStreamTo(ctx, w, flush, stream)
 - `NewRunResponse(run)` 返回只包含 run metadata 的状态响应，不包含 history。
 - `NewCancelResponse()` 和 `NewDeleteSessionResponse()` 返回 `{ "ok": true }`。
 
-`GET /sessions/:sessionId` 的 history 应由应用自己的 endpoint 查询。实时 stream 使用 UI Message Stream 的 text、reasoning、provider-executed tool、finish/error/abort 事件；Eino 完整输出同时由 writer 以 `[]*schema.Message` 返回。
+`GET /sessions/:sessionId` 的 history 应由应用自己的 endpoint 查询。实时 stream 使用 UI Message Stream 的 text、reasoning、provider-executed tool、finish/error/abort 事件；Eino 完整输出和累计 usage 同时由 writer 以 `StreamResult` 返回。
 
 
 ## Run 查询与生命周期

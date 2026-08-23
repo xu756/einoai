@@ -18,7 +18,7 @@ run, err := svc.CreateRun(ctx, einoai.CreateRunRequest{
     SessionID: openai.ResolveSessionID(req, headerSessionID, querySessionID),
     Messages:  messages,
     Agent:     agent,
-    OnCompleted: func(ctx context.Context, result *einoai.RunResult) error {
+    OnTerminated: func(ctx context.Context, result *einoai.RunResult) error {
         return historyRepo.Replace(ctx, result.Run.SessionID, result.Messages)
     },
 })
@@ -30,14 +30,17 @@ stream, err := svc.SubscribeEvents(ctx, einoai.SubscribeRequest{
 defer stream.Close()
 
 openai.SetChatCompletionStreamHeaders(w.Header())
-output, err := openai.WriteChatCompletionStreamTo(ctx, w, flush, req, stream)
-// output 是当前 run 完整的 []*schema.Message，可直接交给主程序保存。
+result, err := openai.WriteChatCompletionStreamTo(ctx, w, flush, req, stream)
+// result.Output 是完整/部分 Eino 输出；result.Usage 是整个 agent run 的累计 token usage。
+// 应用可将 result 落库；Redis run/event 数据按 1 小时 TTL 自动过期。
 
 // CollectChatCompletion 仅作为聚合工具保留，不用于 HTTP 响应模式切换：
 body, output, err := openai.CollectChatCompletion(ctx, req, stream)
 ```
 
-`OnCompleted` 只在正常完成时调用；取消和异常不会调用。hook 错误不会改变 run 状态，应用应自行处理幂等、超时和重试。
+`OnCompleted` 只在正常完成时调用；`OnTerminated` 覆盖完成、取消和异常。hook 错误不会改变 run 状态，应用应自行处理幂等、超时和重试。
+
+completions 和 run 订阅在建立 `EventStream` 前失败时，也应调用 `WriteChatCompletionStreamErrorTo`，以 OpenAI error SSE frame 后接 `data: [DONE]` 结束。创建、查询、删除和取消 run 仍使用普通 HTTP JSON 错误。
 
 ## Response helpers
 
@@ -45,7 +48,7 @@ body, output, err := openai.CollectChatCompletion(ctx, req, stream)
 - `NewRunResponse(run)` 返回只包含 run metadata 的状态响应，不包含 history。
 - `NewCancelResponse()` 和 `NewDeleteSessionResponse()` 返回 `{ "ok": true }`。
 
-session GET 只返回 run 状态。业务 history 必须由应用自己的 endpoint 查询；实时 stream 严格输出 Chat Completions 可表示的可见文本、终止原因和可选 usage。Eino agent 内部 reasoning 与服务端工具步骤不写入 OpenAI wire，而是完整保留在 writer 返回的 `[]*schema.Message` 中。
+session GET 只返回 run 状态。业务 history 必须由应用自己的 endpoint 查询；实时 stream 严格输出 Chat Completions 可表示的可见文本、终止原因和可选 usage。Eino agent 内部 reasoning 与服务端工具步骤不写入 OpenAI wire，而是完整保留在 writer 返回的 `StreamResult.Output` 中。
 
 
 ## Run 查询与生命周期

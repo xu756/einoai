@@ -9,9 +9,41 @@ import (
 )
 
 func TestNewServiceUsesDefaultRedisTTL(t *testing.T) {
+	if DefaultRedisTTL != time.Hour {
+		t.Fatalf("expected one-hour default redis ttl, got %s", DefaultRedisTTL)
+	}
 	svc := NewService(nil).(*service)
 	if svc.store.ttl != DefaultRedisTTL {
 		t.Fatalf("expected default redis ttl %s, got %s", DefaultRedisTTL, svc.store.ttl)
+	}
+}
+
+func TestServiceAppendFinishFinalizesRunBeforePublishingTerminalEvent(t *testing.T) {
+	store, cleanup := newTestRedisStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	run := &RunInfo{SessionID: "s1", RunID: "r1", Status: RunStatusRunning}
+	if err := store.initRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	svc := &service{store: store}
+	if err := svc.appendFinish(ctx, "s1", "r1", "stop", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	found, err := store.getRun(ctx, "s1", "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found == nil || found.Status != RunStatusCompleted {
+		t.Fatalf("expected completed run before terminal event is consumed, got %#v", found)
+	}
+	current, err := store.getCurrentRun(ctx, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current != nil {
+		t.Fatalf("expected terminal run pointer cleared, got %#v", current)
 	}
 }
 
@@ -43,6 +75,49 @@ func TestCompletionHookPanicIsReported(t *testing.T) {
 	}, &RunResult{})
 	if got == nil {
 		t.Fatal("expected panic to be reported as hook error")
+	}
+}
+
+func TestRunHooksInvokeTerminatedForEveryTerminalStatusAndCompletedOnlyOnSuccess(t *testing.T) {
+	svc := &service{}
+	var completed, terminated int
+	onCompleted := func(context.Context, *RunResult) error {
+		completed++
+		return nil
+	}
+	onTerminated := func(context.Context, *RunResult) error {
+		terminated++
+		return nil
+	}
+	for _, status := range []RunStatus{RunStatusCompleted, RunStatusCancelled, RunStatusFailed} {
+		result := &RunResult{Run: &RunInfo{SessionID: "s1", RunID: string(status), Status: status}}
+		svc.invokeRunHooks(context.Background(), onCompleted, onTerminated, result)
+	}
+	if completed != 1 {
+		t.Fatalf("OnCompleted must remain success-only, got %d calls", completed)
+	}
+	if terminated != 3 {
+		t.Fatalf("OnTerminated must receive every terminal status, got %d calls", terminated)
+	}
+}
+
+func TestCreateRunRequestAcceptsTerminalCallback(t *testing.T) {
+	hook := func(context.Context, *RunResult) error { return nil }
+	req := CreateRunRequest{OnTerminated: hook}
+	if req.OnTerminated == nil {
+		t.Fatal("terminal callback was not retained")
+	}
+}
+
+func TestWatchLifecycleOnlyCancelsMissingOrCancelledRuns(t *testing.T) {
+	if shouldCancelWatchedRun(&RunInfo{Status: RunStatusCompleted}) {
+		t.Fatal("a locally completed run must not cancel its own runner context")
+	}
+	if !shouldCancelWatchedRun(&RunInfo{Status: RunStatusCancelled}) {
+		t.Fatal("a remotely cancelled run must cancel its runner context")
+	}
+	if !shouldCancelWatchedRun(nil) {
+		t.Fatal("a deleted run must cancel its runner context")
 	}
 }
 

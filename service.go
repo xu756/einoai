@@ -102,7 +102,7 @@ func (s *service) CreateRun(ctx context.Context, req CreateRunRequest) (*RunInfo
 
 	runCtx, cancel := s.newRunContext(ctx)
 	s.registerRunCancel(run.RunID, cancel)
-	go s.executeRun(runCtx, cancel, cloneRunInfo(run), snapshotMessages, req.Agent, req.OnCompleted)
+	go s.executeRun(runCtx, cancel, cloneRunInfo(run), snapshotMessages, req.Agent, req.OnCompleted, req.OnTerminated)
 
 	return cloneRunInfo(run), nil
 }
@@ -389,10 +389,7 @@ func (s *service) CancelRun(ctx context.Context, sessionID string, runID string)
 	if err := s.appendFinish(ctx, sessionID, runID, "cancelled", nil, nil); err != nil {
 		return err
 	}
-	if err := s.store.setRunStatus(ctx, sessionID, runID, RunStatusCancelled, ""); err != nil {
-		return err
-	}
-	return s.store.clearCurrentRunIfMatches(ctx, sessionID, runID)
+	return nil
 }
 
 func (s *service) SubscribeEvents(ctx context.Context, req SubscribeRequest) (EventStream, error) {
@@ -412,7 +409,7 @@ func (s *service) SubscribeEvents(ctx context.Context, req SubscribeRequest) (Ev
 	return newRedisEventStream(s.store, req.SessionID, req.RunID, req.AfterEventID), nil
 }
 
-func (s *service) executeRun(ctx context.Context, cancel context.CancelFunc, run *RunInfo, messages []*schema.Message, agent adk.Agent, onCompleted OnRunCompleted) {
+func (s *service) executeRun(ctx context.Context, cancel context.CancelFunc, run *RunInfo, messages []*schema.Message, agent adk.Agent, onCompleted OnRunCompleted, onTerminated OnRunTerminated) {
 	defer cancel()
 	defer s.unregisterRunCancel(run.RunID)
 
@@ -449,9 +446,16 @@ func (s *service) executeRun(ctx context.Context, cancel context.CancelFunc, run
 		}
 		if errors.Is(err, context.Canceled) {
 			s.finishCancelled(persistCtx, state, sessionID, runID)
+			run.Status = RunStatusCancelled
+			run.UpdatedAt = time.Now()
+			s.invokeRunHooks(persistCtx, onCompleted, onTerminated, newRunResult(run, messages, state))
 			return
 		}
 		s.finishFailed(persistCtx, state, sessionID, runID, err)
+		run.Status = RunStatusFailed
+		run.Error = err.Error()
+		run.UpdatedAt = time.Now()
+		s.invokeRunHooks(persistCtx, onCompleted, onTerminated, newRunResult(run, messages, state))
 		return
 	}
 
@@ -459,7 +463,7 @@ func (s *service) executeRun(ctx context.Context, cancel context.CancelFunc, run
 		return
 	}
 	if !state.finished {
-		if err := state.writeFinish(persistCtx, "stop", state.usage); err != nil {
+		if err := state.writeFinish(persistCtx, "stop", state.stepUsage); err != nil {
 			if !errors.Is(err, errSessionDeleted) && !errors.Is(err, errRunTerminal) {
 				s.finishFailed(persistCtx, state, sessionID, runID, err)
 			}
@@ -469,21 +473,28 @@ func (s *service) executeRun(ctx context.Context, cancel context.CancelFunc, run
 	if s.isRunDeleted(runID) {
 		return
 	}
-	if err := s.store.setRunStatus(persistCtx, sessionID, runID, RunStatusCompleted, ""); err != nil {
-		return
-	}
-	_ = s.store.clearCurrentRunIfMatches(persistCtx, sessionID, runID)
-
 	run.Status = RunStatusCompleted
 	run.UpdatedAt = time.Now()
-	result := &RunResult{
-		Run:      cloneRunInfo(run),
-		Input:    cloneMessages(messages),
-		Output:   cloneMessages(state.outputMessages),
-		Messages: cloneMessages(append(append([]*schema.Message{}, messages...), state.outputMessages...)),
-		Usage:    cloneTokenUsage(state.usage),
+	s.invokeRunHooks(persistCtx, onCompleted, onTerminated, newRunResult(run, messages, state))
+}
+
+func newRunResult(run *RunInfo, input []*schema.Message, state *runEventBuilder) *RunResult {
+	var output []*schema.Message
+	var usage *schema.TokenUsage
+	var finishReason string
+	if state != nil {
+		output = state.outputMessages
+		usage = state.usage
+		finishReason = state.finishReason
 	}
-	s.invokeCompletionHook(persistCtx, sessionID, runID, onCompleted, result)
+	return &RunResult{
+		Run:          cloneRunInfo(run),
+		Input:        cloneMessages(input),
+		Output:       cloneMessages(output),
+		Messages:     cloneMessages(append(append([]*schema.Message{}, input...), output...)),
+		Usage:        cloneTokenUsage(usage),
+		FinishReason: finishReason,
+	}
 }
 
 func (s *service) watchRunLifecycle(ctx context.Context, sessionID, runID string, cancel context.CancelFunc) {
@@ -498,7 +509,7 @@ func (s *service) watchRunLifecycle(ctx context.Context, sessionID, runID string
 			if err != nil {
 				continue
 			}
-			if run == nil || isTerminalRunStatus(run.Status) {
+			if shouldCancelWatchedRun(run) {
 				cancel()
 				return
 			}
@@ -506,12 +517,17 @@ func (s *service) watchRunLifecycle(ctx context.Context, sessionID, runID string
 	}
 }
 
+func shouldCancelWatchedRun(run *RunInfo) bool {
+	return run == nil || run.Status == RunStatusCancelled
+}
+
 func (s *service) finishCancelled(ctx context.Context, state *runEventBuilder, sessionID, runID string) {
 	_ = state.closeOpenBlocks(ctx)
 	_ = state.commitAssistantMessage()
-	_ = s.appendFinish(ctx, sessionID, runID, "cancelled", nil, cloneMessages(state.outputMessages))
-	_ = s.store.setRunStatus(ctx, sessionID, runID, RunStatusCancelled, "")
-	_ = s.store.clearCurrentRunIfMatches(ctx, sessionID, runID)
+	state.usage = addTokenUsage(state.usage, state.stepUsage)
+	state.stepUsage = nil
+	state.finishReason = "cancelled"
+	_ = s.appendFinish(ctx, sessionID, runID, "cancelled", state.usage, cloneMessages(state.outputMessages))
 }
 
 func (s *service) finishFailed(ctx context.Context, state *runEventBuilder, sessionID, runID string, runErr error) {
@@ -520,10 +536,11 @@ func (s *service) finishFailed(ctx context.Context, state *runEventBuilder, sess
 	}
 	_ = state.closeOpenBlocks(ctx)
 	_ = state.commitAssistantMessage()
+	state.usage = addTokenUsage(state.usage, state.stepUsage)
+	state.stepUsage = nil
+	state.finishReason = "error"
 	_, _ = s.appendEvent(ctx, sessionID, runID, EventError, ErrorData{Message: runErr.Error()})
-	_ = s.appendFinish(ctx, sessionID, runID, "error", nil, cloneMessages(state.outputMessages))
-	_ = s.store.setRunStatus(ctx, sessionID, runID, RunStatusFailed, runErr.Error())
-	_ = s.store.clearCurrentRunIfMatches(ctx, sessionID, runID)
+	_ = s.appendTerminalFinish(ctx, sessionID, runID, "error", state.usage, cloneMessages(state.outputMessages), RunStatusFailed, runErr.Error())
 }
 
 func (s *service) invokeCompletionHook(ctx context.Context, sessionID, runID string, hook OnRunCompleted, result *RunResult) {
@@ -541,6 +558,19 @@ func (s *service) invokeCompletionHook(ctx context.Context, sessionID, runID str
 	}()
 	if hookErr != nil && s.completionErrorHook != nil {
 		s.completionErrorHook(ctx, sessionID, runID, hookErr)
+	}
+}
+
+func (s *service) invokeRunHooks(ctx context.Context, onCompleted OnRunCompleted, onTerminated OnRunTerminated, result *RunResult) {
+	if result == nil || result.Run == nil {
+		return
+	}
+	sessionID, runID := result.Run.SessionID, result.Run.RunID
+	if onTerminated != nil {
+		s.invokeCompletionHook(ctx, sessionID, runID, OnRunCompleted(onTerminated), result)
+	}
+	if result.Run.Status == RunStatusCompleted {
+		s.invokeCompletionHook(ctx, sessionID, runID, onCompleted, result)
 	}
 }
 
@@ -608,11 +638,42 @@ func (s *service) appendEvent(ctx context.Context, sessionID, runID string, typ 
 }
 
 func (s *service) appendFinish(ctx context.Context, sessionID, runID string, reason string, usage *schema.TokenUsage, output []*schema.Message) error {
-	_, err := s.appendEvent(ctx, sessionID, runID, EventFinish, FinishData{
-		FinishReason: reason,
-		Usage:        usage,
-		Output:       output,
-	})
+	event := RunEvent{
+		SessionID: sessionID,
+		RunID:     runID,
+		Type:      EventFinish,
+		Data: FinishData{
+			FinishReason: reason,
+			Usage:        usage,
+			Output:       output,
+		},
+	}
+	if reason == "tool_calls" || reason == "tool-calls" {
+		_, err := s.appendEvent(ctx, sessionID, runID, event.Type, event.Data)
+		return err
+	}
+	status := RunStatusCompleted
+	switch reason {
+	case "cancelled", "canceled":
+		status = RunStatusCancelled
+	case "error":
+		status = RunStatusFailed
+	}
+	return s.appendTerminalFinish(ctx, sessionID, runID, reason, usage, output, status, "")
+
+}
+
+func (s *service) appendTerminalFinish(ctx context.Context, sessionID, runID, reason string, usage *schema.TokenUsage, output []*schema.Message, status RunStatus, errText string) error {
+	_, err := s.store.finishRun(ctx, RunEvent{
+		SessionID: sessionID,
+		RunID:     runID,
+		Type:      EventFinish,
+		Data: FinishData{
+			FinishReason: reason,
+			Usage:        usage,
+			Output:       output,
+		},
+	}, status, errText)
 	return err
 }
 

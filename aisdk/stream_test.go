@@ -91,7 +91,7 @@ func TestWriteEventStreamToWritesWithoutGin(t *testing.T) {
 
 func TestWriteEventStreamOrdersReasoningToolsAndFinalUsage(t *testing.T) {
 	var buf bytes.Buffer
-	_, err := WriteEventStreamTo(context.Background(), &buf, nil, &aisdkSliceEventStream{events: []*einoai.RunEvent{
+	result, err := WriteEventStreamTo(context.Background(), &buf, nil, &aisdkSliceEventStream{events: []*einoai.RunEvent{
 		{RunID: "run_1", Type: einoai.EventReasoningStart, Data: einoai.ReasoningData{ID: "reasoning_1"}},
 		{RunID: "run_1", Type: einoai.EventReasoningDelta, Data: einoai.ReasoningData{ID: "reasoning_1", Delta: "think"}},
 		{RunID: "run_1", Type: einoai.EventReasoningEnd, Data: einoai.ReasoningData{ID: "reasoning_1"}},
@@ -108,6 +108,9 @@ func TestWriteEventStreamOrdersReasoningToolsAndFinalUsage(t *testing.T) {
 	}})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if result.FinishReason != "stop" || result.Usage == nil || result.Usage.TotalTokens != 7 {
+		t.Fatalf("terminal result must retain usage even without output messages: %#v", result)
 	}
 	body := buf.String()
 	ordered := []string{
@@ -216,8 +219,11 @@ func TestWriteEventStreamReturnsCompleteEinoOutputAndUsesDataLinesOnly(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].Content != "hello" {
+	if len(got.Output) != 1 || got.Output[0].Content != "hello" {
 		t.Fatalf("complete Eino output was not returned: %#v", got)
+	}
+	if got.FinishReason != "stop" {
+		t.Fatalf("finish reason was not returned: %#v", got)
 	}
 	if strings.Contains(buf.String(), "id: ") {
 		t.Fatalf("AI SDK wire stream must contain data frames only, got:\n%s", buf.String())
@@ -271,13 +277,20 @@ func TestWriteEventStreamReturnsOutputAfterRunError(t *testing.T) {
 		{RunID: "run_1", Type: einoai.EventTextDelta, Data: einoai.TextData{ID: "text_1", Delta: "partial"}},
 		{RunID: "run_1", Type: einoai.EventTextEnd, Data: einoai.TextData{ID: "text_1"}},
 		{RunID: "run_1", Type: einoai.EventError, Data: einoai.ErrorData{Message: "boom"}},
-		{RunID: "run_1", Type: einoai.EventFinish, Data: einoai.FinishData{FinishReason: "error", Output: want}},
+		{RunID: "run_1", Type: einoai.EventFinish, Data: einoai.FinishData{
+			FinishReason: "error",
+			Output:       want,
+			Usage:        &schema.TokenUsage{PromptTokens: 4, CompletionTokens: 1, TotalTokens: 5},
+		}},
 	}})
 	if err == nil || err.Error() != "boom" {
 		t.Fatalf("expected run error after stream terminates, got %v", err)
 	}
-	if len(got) != 1 || got[0].Content != "partial" {
+	if len(got.Output) != 1 || got.Output[0].Content != "partial" {
 		t.Fatalf("expected partial Eino output after error, got %#v", got)
+	}
+	if got.Usage == nil || got.Usage.TotalTokens != 5 || got.FinishReason != "error" {
+		t.Fatalf("expected terminal usage and reason after error, got %#v", got)
 	}
 	body := buf.String()
 	if !strings.Contains(body, `"type":"error"`) || !strings.Contains(body, `"finishReason":"error"`) || !strings.Contains(body, "data: [DONE]") {
@@ -292,13 +305,20 @@ func TestWriteEventStreamUsesAbortForCancelledRunAndReturnsPartialOutput(t *test
 		{RunID: "run_1", Type: einoai.EventTextStart, Data: einoai.TextData{ID: "text_1"}},
 		{RunID: "run_1", Type: einoai.EventTextDelta, Data: einoai.TextData{ID: "text_1", Delta: "partial"}},
 		{RunID: "run_1", Type: einoai.EventTextEnd, Data: einoai.TextData{ID: "text_1"}},
-		{RunID: "run_1", Type: einoai.EventFinish, Data: einoai.FinishData{FinishReason: "cancelled", Output: want}},
+		{RunID: "run_1", Type: einoai.EventFinish, Data: einoai.FinishData{
+			FinishReason: "cancelled",
+			Output:       want,
+			Usage:        &schema.TokenUsage{PromptTokens: 2, CompletionTokens: 1, TotalTokens: 3},
+		}},
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].Content != "partial" {
+	if len(got.Output) != 1 || got.Output[0].Content != "partial" {
 		t.Fatalf("expected partial output on cancellation, got %#v", got)
+	}
+	if got.Usage == nil || got.Usage.TotalTokens != 3 || got.FinishReason != "cancelled" {
+		t.Fatalf("expected cancellation usage and reason, got %#v", got)
 	}
 	body := buf.String()
 	if !strings.Contains(body, `"type":"abort"`) || strings.Contains(body, `"finishReason":"other"`) {

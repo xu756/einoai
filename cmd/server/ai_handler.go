@@ -22,27 +22,26 @@ func (a *app) registerAISDK(r gin.IRouter) {
 func (a *app) aiCompletions(c *gin.Context) {
 	req, err := aisdk.DecodeCompletionsRequest(c.Request.Body)
 	if err != nil {
-		writeAIError(c, err)
+		writeAIStreamError(c, err)
 		return
 	}
 	messages, err := aisdk.ToSchemaMessages(req)
 	if err != nil {
-		writeAIError(c, err)
+		writeAIStreamError(c, err)
 		return
 	}
 	agent, err := a.resolveAgent(c.Request.Context())
 	if err != nil {
-		writeAIError(c, err)
+		writeAIStreamError(c, err)
 		return
 	}
 	run, err := a.svc.CreateRun(c.Request.Context(), newAgentRunRequest(
 		temporarySessionID("usechat"),
 		messages,
 		agent,
-		a.onRunCompleted,
 	))
 	if err != nil {
-		writeAIError(c, err)
+		writeAIStreamError(c, err)
 		return
 	}
 	stream, err := a.svc.SubscribeEvents(c.Request.Context(), einoai.SubscribeRequest{
@@ -50,7 +49,7 @@ func (a *app) aiCompletions(c *gin.Context) {
 		RunID:     run.RunID,
 	})
 	if err != nil {
-		writeAIError(c, err)
+		writeAIStreamError(c, err)
 		return
 	}
 	defer func() {
@@ -83,7 +82,6 @@ func (a *app) createAIRun(c *gin.Context) {
 		sessionID,
 		messages,
 		agent,
-		a.onRunCompleted,
 	))
 	if err != nil {
 		writeAIError(c, err)
@@ -120,7 +118,7 @@ func (a *app) subscribeAIEvents(c *gin.Context) {
 		RunID:     c.Param("run_id"),
 	})
 	if err != nil {
-		writeAIError(c, err)
+		writeAIStreamError(c, err)
 		return
 	}
 	defer func() {

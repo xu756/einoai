@@ -339,6 +339,65 @@ return id
 	return &ev, nil
 }
 
+func (s *redisStore) finishRun(ctx context.Context, ev RunEvent, status RunStatus, errText string) (*RunEvent, error) {
+	if ev.CreatedAt.IsZero() {
+		ev.CreatedAt = time.Now()
+	}
+	data, err := json.Marshal(ev.Data)
+	if err != nil {
+		return nil, fmt.Errorf("marshal terminal event data: %w", err)
+	}
+	body, err := json.Marshal(storedEvent{
+		Type:      ev.Type,
+		Data:      data,
+		CreatedAt: ev.CreatedAt.UnixMilli(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal terminal event: %w", err)
+	}
+
+	const script = `
+if redis.call("EXISTS", KEYS[1]) == 0 then
+	return "__missing__"
+end
+local current_status = redis.call("HGET", KEYS[1], "status")
+if current_status == "completed" or current_status == "cancelled" or current_status == "failed" then
+	return "__terminal__"
+end
+local id = redis.call("XADD", KEYS[2], "*", "data", ARGV[1], "ts", ARGV[2])
+redis.call("HSET", KEYS[1], "status", ARGV[3], "updated_at", ARGV[2], "error", ARGV[4])
+if redis.call("GET", KEYS[3]) == ARGV[5] then
+	redis.call("DEL", KEYS[3])
+end
+local ttl = tonumber(ARGV[6])
+if ttl and ttl > 0 then
+	redis.call("PEXPIRE", KEYS[1], ttl)
+	redis.call("PEXPIRE", KEYS[2], ttl)
+end
+return id
+`
+	result, err := s.rdb.Eval(ctx, script, []string{
+		runMetaKey(ev.SessionID, ev.RunID),
+		runEventsKey(ev.SessionID, ev.RunID),
+		currentRunKey(ev.SessionID),
+	}, string(body), ev.CreatedAt.UnixMilli(), string(status), errText, ev.RunID, s.ttlMilliseconds()).Result()
+	if err != nil {
+		return nil, err
+	}
+	id, ok := result.(string)
+	if !ok {
+		return nil, fmt.Errorf("finish run returned unexpected result %T", result)
+	}
+	switch id {
+	case "__missing__":
+		return nil, ErrRunNotFound
+	case "__terminal__":
+		return nil, errRunTerminal
+	}
+	ev.ID = id
+	return &ev, nil
+}
+
 func (s *redisStore) expire(ctx context.Context, key string) {
 	if s.ttl <= 0 {
 		return

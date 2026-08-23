@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const eventStreamBlockDuration = 250 * time.Millisecond
+
 type redisEventStream struct {
 	store     *redisStore
 	sessionID string
@@ -50,7 +52,10 @@ func (s *redisEventStream) Next(ctx context.Context) (*RunEvent, error) {
 			return nil, err
 		}
 
-		events, err := s.store.readAfter(readCtx, s.sessionID, s.runID, s.lastID, 15*time.Second, 1)
+		// go-redis cannot interrupt an in-flight blocking socket read from a
+		// cancellation-only context. Keep BLOCK bounded so Close is observed
+		// promptly without leaking a reader goroutine or dedicated connection.
+		events, err := s.store.readAfter(readCtx, s.sessionID, s.runID, s.lastID, eventStreamBlockDuration, 1)
 		if err != nil {
 			if s.isClosed() && errors.Is(err, context.Canceled) {
 				return nil, io.EOF

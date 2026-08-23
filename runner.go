@@ -19,7 +19,9 @@ type runEventBuilder struct {
 	reasoningStarted bool
 	think            thinkSplitter
 	finished         bool
+	finishReason     string
 	usage            *schema.TokenUsage
+	stepUsage        *schema.TokenUsage
 	toolCalls        map[int]*toolCallState
 	assistantChunks  []*schema.Message
 	outputMessages   []*schema.Message
@@ -55,6 +57,7 @@ func (b *runEventBuilder) advanceStep() {
 	b.think = thinkSplitter{}
 	b.toolCalls = make(map[int]*toolCallState)
 	b.assistantChunks = nil
+	b.stepUsage = nil
 	b.resetIDs()
 }
 
@@ -95,10 +98,10 @@ func (b *runEventBuilder) writeMessage(ctx context.Context, msg *schema.Message)
 	}
 	if msg.ResponseMeta != nil {
 		if msg.ResponseMeta.Usage != nil {
-			b.usage = msg.ResponseMeta.Usage
+			b.stepUsage = cloneTokenUsage(msg.ResponseMeta.Usage)
 		}
 		if msg.ResponseMeta.FinishReason != "" {
-			return b.writeFinish(ctx, msg.ResponseMeta.FinishReason, msg.ResponseMeta.Usage)
+			return b.writeFinish(ctx, msg.ResponseMeta.FinishReason, b.stepUsage)
 		}
 	}
 	return nil
@@ -256,8 +259,8 @@ func (b *runEventBuilder) flushToolCall(ctx context.Context, index int, st *tool
 }
 
 func (b *runEventBuilder) writeFinish(ctx context.Context, reason string, usage *schema.TokenUsage) error {
-	if usage != nil {
-		b.usage = usage
+	if usage != nil && usage != b.usage {
+		b.stepUsage = cloneTokenUsage(usage)
 	}
 	if err := b.closeOpenBlocks(ctx); err != nil {
 		return err
@@ -265,6 +268,8 @@ func (b *runEventBuilder) writeFinish(ctx context.Context, reason string, usage 
 	if err := b.commitAssistantMessage(); err != nil {
 		return err
 	}
+	b.usage = addTokenUsage(b.usage, b.stepUsage)
+	b.stepUsage = nil
 	var output []*schema.Message
 	if reason != "tool_calls" {
 		output = cloneMessages(b.outputMessages)
@@ -277,6 +282,7 @@ func (b *runEventBuilder) writeFinish(ctx context.Context, reason string, usage 
 		return nil
 	}
 	b.finished = true
+	b.finishReason = reason
 	return nil
 }
 
@@ -291,11 +297,11 @@ func (b *runEventBuilder) commitAssistantMessage() error {
 	if msg.Role == "" {
 		msg.Role = schema.Assistant
 	}
-	if b.usage != nil {
+	if b.stepUsage != nil {
 		if msg.ResponseMeta == nil {
 			msg.ResponseMeta = &schema.ResponseMeta{}
 		}
-		msg.ResponseMeta.Usage = b.usage
+		msg.ResponseMeta.Usage = cloneTokenUsage(b.stepUsage)
 	}
 	assignSessionMessageID(msg, b.runID, "output", len(b.outputMessages))
 	b.outputMessages = append(b.outputMessages, msg)

@@ -23,17 +23,17 @@ func (a *app) registerOpenAI(r gin.IRouter) {
 func (a *app) openAICompletions(c *gin.Context) {
 	req, err := openai.DecodeChatCompletionsRequest(c.Request.Body)
 	if err != nil {
-		writeOpenAIError(c, err)
+		writeOpenAIStreamError(c, err)
 		return
 	}
 	messages, err := openai.ToSchemaMessages(req)
 	if err != nil {
-		writeOpenAIError(c, err)
+		writeOpenAIStreamError(c, err)
 		return
 	}
 	agent, err := a.resolveAgent(c.Request.Context())
 	if err != nil {
-		writeOpenAIError(c, err)
+		writeOpenAIStreamError(c, err)
 		return
 	}
 
@@ -41,10 +41,9 @@ func (a *app) openAICompletions(c *gin.Context) {
 		openai.ResolveSessionID(req, c.GetHeader("X-Session-ID"), c.Query("sessionId")),
 		messages,
 		agent,
-		a.onRunCompleted,
 	))
 	if err != nil {
-		writeOpenAIError(c, err)
+		writeOpenAIStreamError(c, err)
 		return
 	}
 	stream, err := a.svc.SubscribeEvents(c.Request.Context(), einoai.SubscribeRequest{
@@ -52,7 +51,7 @@ func (a *app) openAICompletions(c *gin.Context) {
 		RunID:     run.RunID,
 	})
 	if err != nil {
-		writeOpenAIError(c, err)
+		writeOpenAIStreamError(c, err)
 		return
 	}
 	defer func() {
@@ -61,7 +60,7 @@ func (a *app) openAICompletions(c *gin.Context) {
 
 	// This package always exposes completions as an OpenAI-compatible SSE stream.
 	// req.Stream is intentionally ignored; callers that need to persist the Eino
-	// output can use the messages returned by WriteChatCompletionStreamTo.
+	// output can use the StreamResult returned by WriteChatCompletionStreamTo.
 	openai.SetChatCompletionStreamHeaders(c.Writer.Header())
 	_, _ = openai.WriteChatCompletionStreamTo(c.Request.Context(), c.Writer, c.Writer.Flush, req, stream)
 }
@@ -89,7 +88,6 @@ func (a *app) createOpenAIRun(c *gin.Context) {
 		sessionID,
 		messages,
 		agent,
-		a.onRunCompleted,
 	))
 	if err != nil {
 		writeOpenAIError(c, err)
@@ -125,7 +123,7 @@ func (a *app) subscribeOpenAIEvents(c *gin.Context) {
 		RunID:     c.Param("run_id"),
 	})
 	if err != nil {
-		writeOpenAIError(c, err)
+		writeOpenAIStreamError(c, err)
 		return
 	}
 	defer func() {

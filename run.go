@@ -13,7 +13,7 @@ import (
 
 const (
 	// DefaultRedisTTL is the default expiration for Redis-backed run and event keys.
-	DefaultRedisTTL = 7 * 24 * time.Hour
+	DefaultRedisTTL = time.Hour
 	// DefaultRunTimeout limits one asynchronous agent run.
 	DefaultRunTimeout = 10 * time.Minute
 )
@@ -39,26 +39,31 @@ const (
 
 // CreateRunRequest starts an agent run for a session.
 type CreateRunRequest struct {
-	SessionID   string
-	Messages    []*schema.Message
-	Agent       adk.Agent
-	Metadata    map[string]any
-	OnCompleted OnRunCompleted
+	SessionID    string
+	Messages     []*schema.Message
+	Agent        adk.Agent
+	Metadata     map[string]any
+	OnCompleted  OnRunCompleted
+	OnTerminated OnRunTerminated
 }
 
-// RunResult contains the complete result of a successfully completed run.
+// RunResult contains complete or partial data for a terminal run.
 type RunResult struct {
-	Run      *RunInfo
-	Input    []*schema.Message
-	Output   []*schema.Message
-	Messages []*schema.Message
-	Usage    *schema.TokenUsage
+	Run          *RunInfo
+	Input        []*schema.Message
+	Output       []*schema.Message
+	Messages     []*schema.Message
+	Usage        *schema.TokenUsage
+	FinishReason string
 }
 
 // OnRunCompleted receives a successfully completed run and its complete messages.
 type OnRunCompleted func(context.Context, *RunResult) error
 
-// CompletionErrorHandler observes errors returned or panics raised by OnRunCompleted.
+// OnRunTerminated receives completed, cancelled, and failed run results.
+type OnRunTerminated func(context.Context, *RunResult) error
+
+// CompletionErrorHandler observes errors returned or panics raised by terminal hooks.
 type CompletionErrorHandler func(context.Context, string, string, error)
 
 // SubscribeRequest opens a persisted event stream for a run.
